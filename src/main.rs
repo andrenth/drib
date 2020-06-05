@@ -329,6 +329,9 @@ where
     let mut res = Aggregate::new();
     let mut acc = IpRange::new();
 
+    let is_ipv4 = T::version() == 4;
+    let is_ipv6 = T::version() == 6;
+
     // The `groups` map is sorted by descending priority. For each
     // group, we remove every range that appears in higher priority
     // groups. Its own ranges are then merged with the higher priority
@@ -345,6 +348,8 @@ where
                     kind,
                     class,
                     range,
+                    is_ipv4,
+                    is_ipv6,
                 };
                 res.insert(entry);
             }
@@ -768,11 +773,15 @@ where
         } else {
             None
         };
+        let is_ipv4 = T::version() == 4;
+        let is_ipv6 = T::version() == 6;
         let entry = Entry {
             priority,
             kind,
             class,
             range,
+            is_ipv4,
+            is_ipv6,
         };
         aggr.insert(entry);
     }
@@ -1912,6 +1921,8 @@ ipv4_remove: [
     kind: "{entry.kind}",
     class: "{entry.class}",
     range: "{entry.range}",
+    is_ipv4: true,
+    is_ipv6: false,
   },
 {{- endfor }}
 ]
@@ -1923,6 +1934,8 @@ ipv4_insert: [
     kind: "{entry.kind}",
     class: "{entry.class}",
     range: "{entry.range}",
+    is_ipv4: true,
+    is_ipv6: false,
   },
 {{- endfor }}
 ]
@@ -1934,6 +1947,8 @@ ipv6_remove: [
     kind: "{entry.kind}",
     class: "{entry.class}",
     range: "{entry.range}",
+    is_ipv4: false,
+    is_ipv6: true,
   },
 {{- endfor }}
 ]
@@ -1945,6 +1960,8 @@ ipv6_insert: [
     kind: "{entry.kind}",
     class: "{entry.class}",
     range: "{entry.range}",
+    is_ipv4: false,
+    is_ipv6: true,
   },
 {{- endfor }}
 ]"#;
@@ -1980,11 +1997,13 @@ ipv6_insert: [
         }
     }
 
-    fn netvec<'a, T>(nets: &[(&str, &str, usize)]) -> Vec<Entry<T>>
+    fn netvec<'a, T: Net>(nets: &[(&str, &str, usize)]) -> Vec<Entry<T>>
     where
         T: Debug + Ord + FromStr<Err = AddrParseError>,
     {
         let mut vec = Vec::with_capacity(nets.len());
+        let is_ipv4 = T::version() == 4;
+        let is_ipv6 = T::version() == 6;
         for (net, class, priority) in nets {
             let range = net.parse::<T>().unwrap();
             vec.push(Entry {
@@ -1992,6 +2011,8 @@ ipv6_insert: [
                 kind: Some("kind".to_string()),
                 class: class.to_string(),
                 range,
+                is_ipv4,
+                is_ipv6,
             });
         }
         vec.sort();
