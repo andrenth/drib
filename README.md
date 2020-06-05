@@ -286,22 +286,22 @@ Given the JSON document below:
 
 ```json
 {
-  'ipv4': {
-    'prefixes': [
+  "ipv4": {
+    "prefixes": [
       {
-        type: 'foo',
-        prefix: '1.2.3.4/32',
+        "type": "foo",
+        "prefix": "1.2.3.4/32"
       },
       {
-        type: 'foo',
-        prefix: '1.2.3.5/32',
+        "type": "foo",
+        "prefix": "1.2.3.5/32"
       },
       {
-        type: 'bar',
-        prefix: '1.2.3.6/32',
-      },
-    ],
-  },
+        "type": "bar",
+        "prefix": "1.2.3.6/32"
+      }
+    ]
+  }
 }
 ```
 
