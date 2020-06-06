@@ -78,15 +78,39 @@ fn main() -> Result<(), anyhow::Error> {
     setup_logger(&config.log_level);
 
     let mut rt = Builder::new();
-    match config.max_threads {
-        Some(1) => {
+    match (config.max_core_threads, config.max_threads) {
+        (Some(1), Some(1)) => {
             rt.basic_scheduler();
         }
-        Some(n) => {
-            rt.threaded_scheduler();
-            rt.max_threads(n);
+        (Some(n), Some(m)) if n > m => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "max_core_threads can't be greater than max_threads",
+            )
+            .into());
         }
-        None => {
+        (Some(n), Some(m)) => {
+            rt.threaded_scheduler();
+            rt.core_threads(n);
+            rt.max_threads(m);
+        }
+        (Some(n), None) => {
+            rt.threaded_scheduler();
+            rt.core_threads(n);
+        }
+        (None, Some(m)) => {
+            let n = num_cpus::get();
+            if n > m {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "max_core_threads default is larger than max_threads",
+                )
+                .into());
+            }
+            rt.threaded_scheduler();
+            rt.max_threads(m);
+        }
+        (None, None) => {
             rt.threaded_scheduler();
         }
     }

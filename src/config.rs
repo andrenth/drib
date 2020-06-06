@@ -12,15 +12,20 @@ use crate::parser::{Domain, Parser};
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub state_dir: PathBuf,
-    pub bootstrap: Templates,
-    pub diff: ChunkedTemplates,
 
     #[serde(deserialize_with = "parse_log_level")]
     pub log_level: Level,
 
     #[serde(default)]
-    #[serde(deserialize_with = "parse_max_threads")]
+    #[serde(deserialize_with = "parse_num_threads")]
+    pub core_threads: Option<usize>,
+
+    #[serde(default)]
+    #[serde(deserialize_with = "parse_num_threads")]
     pub max_threads: Option<usize>,
+
+    pub bootstrap: Templates,
+    pub diff: ChunkedTemplates,
 
     #[serde(default = "empty_hash_map")]
     pub downloads: Downloads,
@@ -124,14 +129,17 @@ where
     s.parse().map_err(serde::de::Error::custom)
 }
 
-fn parse_max_threads<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+fn parse_num_threads<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: serde::de::Deserializer<'de>,
 {
     let s: String = serde::de::Deserialize::deserialize(deserializer)?;
     match s.parse() {
+        Ok(0) => Err(serde::de::Error::custom(
+            "number of threads must be positive",
+        )),
         Ok(n) if n > 2usize.pow(15) => Err(serde::de::Error::custom(
-            "max_threads must be less than 32,768",
+            "number of threads must be less than 32,768",
         )),
         Ok(n) => Ok(Some(n)),
         Err(e) => Err(serde::de::Error::custom(e)),
