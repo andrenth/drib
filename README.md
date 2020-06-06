@@ -84,6 +84,17 @@ bootstrap: {
 }
 ```
 
+#### `core_threads`
+
+Sets the number of worker threads in Drib's async runtime's ([Tokio](https://tokio.rs/)) thread pool.
+Defaults to the number of cores available to the system.
+
+#### `max_threads`
+
+The maximum number of threads spawned by Drib's async runtime ([Tokio](https://tokio.rs/)).
+This number must be greater than the `core_threads` setting.
+Defaults to 512.
+
 #### `diff`
 
 This section defines input and output settings for diff mode, as described in the `bootstrap` section.
