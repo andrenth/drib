@@ -78,7 +78,7 @@ fn main() -> Result<(), anyhow::Error> {
     setup_logger(&config.log_level);
 
     let mut rt = Builder::new();
-    match (config.max_core_threads, config.max_threads) {
+    match (config.core_threads, config.max_threads) {
         (Some(1), Some(1)) => {
             rt.basic_scheduler();
         }
