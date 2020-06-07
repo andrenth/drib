@@ -57,7 +57,7 @@ The following directives are supported:
 
 #### `state_dir`
 
-The directory where Drib stores downloaded ranges and calculated range aggregates (defaults to `/run/drib`).
+The directory where Drib stores downloaded ranges and calculated range aggregates (defaults to `/var/lib/drib`).
 
 #### `log_level`
 
