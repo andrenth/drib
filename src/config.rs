@@ -11,9 +11,10 @@ use crate::parser::{Domain, Parser};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
 
-    #[serde(deserialize_with = "parse_log_level")]
+    #[serde(deserialize_with = "parse_log_level", default = "default_log_level")]
     pub log_level: Level,
 
     #[serde(default)]
@@ -115,6 +116,14 @@ pub struct DownloadSource<T> {
 pub enum ParserType<T> {
     Ranges(Parser<T>),
     Domains(Parser<Domain>),
+}
+
+fn default_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/drib")
+}
+
+fn default_log_level() -> Level {
+    Level::Info
 }
 
 fn empty_hash_map<T>() -> HashMap<String, T> {
