@@ -152,9 +152,6 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
             let cur_ipv4_aggregate = load_aggregate(&ipv4_path).await?;
             let cur_ipv6_aggregate = load_aggregate(&ipv6_path).await?;
 
-            save_aggregate(&ipv4_path.join(AGGREGATE_FILE), &new_ipv4_aggregate).await?;
-            save_aggregate(&ipv6_path.join(AGGREGATE_FILE), &new_ipv6_aggregate).await?;
-
             let ipv4_insert = &new_ipv4_aggregate - &cur_ipv4_aggregate;
             let ipv6_insert = &new_ipv6_aggregate - &cur_ipv6_aggregate;
 
@@ -168,6 +165,9 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
             render_diff(diff, &config.diff).await?;
         }
     }
+
+    save_aggregate(&ipv4_path.join(AGGREGATE_FILE), &new_ipv4_aggregate).await?;
+    save_aggregate(&ipv6_path.join(AGGREGATE_FILE), &new_ipv6_aggregate).await?;
 
     Ok(())
 }
