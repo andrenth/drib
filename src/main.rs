@@ -2001,6 +2001,7 @@ ipv6_insert: [
         Config {
             state_dir: PathBuf::from(path),
             log_level: Level::Error,
+            core_threads: None,
             max_threads: None,
 
             bootstrap: Templates {
