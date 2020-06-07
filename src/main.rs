@@ -872,9 +872,9 @@ fn setup_logger(level: &Level) {
     let mut builder = Builder::new();
     builder.target(Target::Stdout);
     builder.write_style(WriteStyle::Auto);
-    builder.filter_module("main", level.to_level_filter());
+    builder.filter_module("drib", level.to_level_filter());
 
-    builder.init()
+    builder.init();
 }
 
 async fn safe_write<P: AsRef<Path>>(path: P, buf: &[u8]) -> Result<(), io::Error> {
