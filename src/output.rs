@@ -434,7 +434,6 @@ pub struct Entry<T> {
     pub priority: usize,
     pub kind: Option<String>,
     pub class: String,
+    pub protocol: String,
     pub range: T,
-    pub is_ipv4: bool,
-    pub is_ipv6: bool,
 }

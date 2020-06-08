@@ -332,7 +332,7 @@ parser: {
 
 ### Templates
 
-Drib uses the Rust crate [TinyTemplate](https://docs.rs/tinytemplate/1.1.0/tinytemplate/index.html) for its templating, which has a simple and intuitive [syntax](https://docs.rs/tinytemplate/1.1.0/tinytemplate/syntax/index.html).
+Drib uses the Rust crate [Tera](https://tera.netlify.app/docs) for its templating, which has a simple and intuitive [syntax](https://tera.netlify.app/docs/#templates) similar do Django templates.
 
 When running in bootstrap mode, Drib provides a global `ranges` object which is an array of `entry` elements.
 The `entry` elements contain information about each range in the following fields:
@@ -340,19 +340,20 @@ The `entry` elements contain information about each range in the following field
 * `priority`: the priority associated to the range, taken from the definition of the group it comes from.
 * `kind`: the kind associated to the range, also taken from the group definition.
 * `class`: the class associated to the range, taken from the definition of the feed it belongs to.
-* `is_ipv4`: a boolean field that is true if the range's protocol is IPv4.
-* `is_ipv6`: a boolean field that is true if the range's protocol is IPv6.
+* `protocol`: the protocol associated to the range, as a string (either `"ipv4"` or `"ipv6"`).
+* `range`: the IP range itself.
 
 The example below creates [iptables](https://www.netfilter.org/) rules blocking ranges in bootstrap mode:
 
 ```
-{{ for entry in ranges -}}
-{{ if entry.is_ipv4 -}}
-iptables -I INPUT -s {entry.range} -j DROP
-{{ else -}}
-ip6tables -I INPUT -s {entry.range} -j DROP
-{{ endif -}}
-{{ endfor -}}
+{% for entry in ranges -%}
+{% if entry.protocol == "ipv4" -%}
+{% set command = "iptables" -%}
+{% else -%}
+{% set command = "ip6tables" -%}
+{% endif -%}
+{{ command }} -I INPUT -s {{ entry.range }} -j DROP
+{% endfor -%}
 ```
 
 When running in diff mode, two global objects are provided to the template: `ipv4` and `ipv6`.
@@ -361,19 +362,39 @@ Both contain two fields, `remove` and `insert`, which are arrays of `entry` elem
 The example below manages iptables rules in diff mode:
 
 ```
-{{ for entry in ipv4.remove -}}
-iptables -D INPUT -s {entry.range} -j DROP
-{{ endfor -}}
+{% for entry in ipv4.remove -%}
+{% if entry.kind == "src" -%}
+{% set param = "-s" -%}
+{% else -%}
+{% set param = "-d" -%}
+{% endif -%}
+iptables -D INPUT {{param}} {{entry.range}} -j DROP
+{% endfor -%}
 
-{{ for entry in ipv4.insert -}}
-iptables -I INPUT -s {entry.range} -j DROP
-{{ endfor -}}
+{% for entry in ipv4.insert -%}
+{% if entry.kind == "src" -%}
+{% set param = "-s" -%}
+{% else -%}
+{% set param = "-d" -%}
+{% endif -%}
+iptables -I INPUT {{param}} {{entry.range}} -j DROP
+{% endfor -%}
 
-{{ for entry in ipv6.remove -}}
-ip6tables -D INPUT -s {entry.range} -j DROP
-{{ endfor -}}
+{% for entry in ipv6.remove -%}
+{% if entry.kind == "src" -%}
+{% set param = "-s" -%}
+{% else -%}
+{% set param = "-d" -%}
+{% endif -%}
+ip6tables -D INPUT {{param}} {{entry.range}} -j DROP
+{% endfor -%}
 
-{{ for entry in ipv6.insert -}}
-ip6tables -I INPUT -s {entry.range} -j DROP
-{{ endfor -}}
+{% for entry in ipv6.insert -%}
+{% if entry.kind == "src" -%}
+{% set param = "-s" -%}
+{% else -%}
+{% set param = "-d" -%}
+{% endif -%}
+ip6tables -I INPUT {{param}} {{entry.range}} -j DROP
+{% endfor -%}
 ```

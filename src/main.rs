@@ -17,7 +17,7 @@ use log::{debug, error, info, warn};
 use regex::Regex;
 use reqwest::{header::IF_MODIFIED_SINCE, Client, StatusCode};
 use serde::Serialize;
-use tinytemplate::TinyTemplate;
+use tera::{self, Tera};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::runtime::Builder;
@@ -316,13 +316,10 @@ where
         )
     })?;
 
-    let mut tt = TinyTemplate::new();
-    tt.add_template("output", &template)
-        .context("failed to add template")?;
+    let mut tera = Tera::default();
+    let context = tera::Context::from_serialize(&data)?;
+    let res = tera.render_str(&template, &context)?;
 
-    let res = tt
-        .render("output", data)
-        .context("failed to render output")?;
     safe_write(&output, res.as_bytes()).await.with_context(|| {
         format!(
             "failed to write rendered file '{}'",
@@ -353,8 +350,7 @@ where
     let mut res = Aggregate::new();
     let mut acc = IpRange::new();
 
-    let is_ipv4 = T::version() == 4;
-    let is_ipv6 = T::version() == 6;
+    let protocol = T::protocol();
 
     // The `groups` map is sorted by descending priority. For each
     // group, we remove every range that appears in higher priority
@@ -367,13 +363,13 @@ where
             for range in &ranges {
                 let kind = kind.map(|k| k.to_owned());
                 let class = class.to_owned();
+                let protocol = protocol.to_owned();
                 let entry = Entry {
                     priority,
                     kind,
                     class,
+                    protocol,
                     range,
-                    is_ipv4,
-                    is_ipv6,
                 };
                 res.insert(entry);
             }
@@ -685,7 +681,7 @@ where
             .await
             .expect("receive resolved addresses failed")
             .context("host lookup failed")?;
-        let path = resolved_domain_path(&path, &domain, T::version());
+        let path = resolved_domain_path(&path, &domain, T::protocol());
         let mut data = String::new();
         for addr in addrs {
             resolved.insert(addr);
@@ -697,12 +693,12 @@ where
     Ok(resolved)
 }
 
-fn resolved_domain_path<P>(base: P, domain: &Domain, version: u8) -> PathBuf
+fn resolved_domain_path<P>(base: P, domain: &Domain, proto: &str) -> PathBuf
 where
     P: AsRef<Path>,
 {
     let mut path = base.as_ref().join(domain.as_str());
-    path.set_extension(version.to_string());
+    path.set_extension(proto);
     path
 }
 
@@ -711,7 +707,7 @@ where
     P: AsRef<Path>,
     T: Net + Hash,
 {
-    let path = resolved_domain_path(path, domain, T::version());
+    let path = resolved_domain_path(path, domain, T::protocol());
 
     let data = match fs::read_to_string(path).await {
         Ok(data) => data,
@@ -797,15 +793,13 @@ where
         } else {
             None
         };
-        let is_ipv4 = T::version() == 4;
-        let is_ipv6 = T::version() == 6;
+        let protocol = T::protocol().to_owned();
         let entry = Entry {
             priority,
             kind,
             class,
+            protocol,
             range,
-            is_ipv4,
-            is_ipv6,
         };
         aggr.insert(entry);
     }
@@ -1939,55 +1933,51 @@ mod tests {
         let template_path = path.join("diff.tpl");
         let template = r#"
 ipv4_remove: [
-{{- for entry in ipv4.remove }}
-  \{
-    priority: {entry.priority},
-    kind: "{entry.kind}",
-    class: "{entry.class}",
-    range: "{entry.range}",
-    is_ipv4: true,
-    is_ipv6: false,
+{%- for entry in ipv4.remove %}
+  {
+    priority: {{entry.priority}},
+    kind: "{{entry.kind}}",
+    class: "{{entry.class}}",
+    protocol: "ipv4",
+    range: "{{entry.range}}",
   },
-{{- endfor }}
+{%- endfor %}
 ]
 
 ipv4_insert: [
-{{- for entry in ipv4.insert }}
-  \{
-    priority: {entry.priority},
-    kind: "{entry.kind}",
-    class: "{entry.class}",
-    range: "{entry.range}",
-    is_ipv4: true,
-    is_ipv6: false,
+{%- for entry in ipv4.insert %}
+  {
+    priority: {{entry.priority}},
+    kind: "{{entry.kind}}",
+    class: "{{entry.class}}",
+    protocol: "ipv4",
+    range: "{{entry.range}}",
   },
-{{- endfor }}
+{%- endfor %}
 ]
 
 ipv6_remove: [
-{{- for entry in ipv6.remove }}
-  \{
-    priority: {entry.priority},
-    kind: "{entry.kind}",
-    class: "{entry.class}",
-    range: "{entry.range}",
-    is_ipv4: false,
-    is_ipv6: true,
+{%- for entry in ipv6.remove %}
+  {
+    priority: {{entry.priority}},
+    kind: "{{entry.kind}}",
+    class: "{{entry.class}}",
+    protocol: "ipv6",
+    range: "{{entry.range}}",
   },
-{{- endfor }}
+{%- endfor %}
 ]
 
 ipv6_insert: [
-{{- for entry in ipv6.insert }}
-  \{
-    priority: {entry.priority},
-    kind: "{entry.kind}",
-    class: "{entry.class}",
-    range: "{entry.range}",
-    is_ipv4: false,
-    is_ipv6: true,
+{%- for entry in ipv6.insert %}
+  {
+    priority: {{entry.priority}},
+    kind: "{{entry.kind}}",
+    class: "{{entry.class}}",
+    protocol: "ipv6",
+    range: "{{entry.range}}",
   },
-{{- endfor }}
+{%- endfor %}
 ]"#;
 
         let mut file = File::create(&template_path)
@@ -2027,17 +2017,15 @@ ipv6_insert: [
         T: Debug + Ord + FromStr<Err = AddrParseError>,
     {
         let mut vec = Vec::with_capacity(nets.len());
-        let is_ipv4 = T::version() == 4;
-        let is_ipv6 = T::version() == 6;
+        let protocol = T::protocol();
         for (net, class, priority) in nets {
             let range = net.parse::<T>().unwrap();
             vec.push(Entry {
                 priority: *priority,
                 kind: Some("kind".to_string()),
                 class: class.to_string(),
+                protocol: protocol.to_string(),
                 range,
-                is_ipv4,
-                is_ipv6,
             });
         }
         vec.sort();

@@ -186,15 +186,15 @@ pub fn parse_net<N: Net>(s: &str) -> Result<N, ParseError> {
 }
 
 pub trait Net: IpNet + FromStr<Err = AddrParseError> {
-    fn version() -> u8;
+    fn protocol() -> &'static str;
     fn max_prefix() -> usize;
     fn from_ip_addr(ip: IpAddr) -> Option<Self>;
     fn lookup_strategy() -> LookupIpStrategy;
 }
 
 impl Net for Ipv4Net {
-    fn version() -> u8 {
-        4
+    fn protocol() -> &'static str {
+        "ipv4"
     }
 
     fn max_prefix() -> usize {
@@ -214,8 +214,8 @@ impl Net for Ipv4Net {
 }
 
 impl Net for Ipv6Net {
-    fn version() -> u8 {
-        6
+    fn protocol() -> &'static str {
+        "ipv6"
     }
 
     fn max_prefix() -> usize {

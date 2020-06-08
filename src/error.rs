@@ -8,7 +8,7 @@ use super::parser::ParseError;
 pub enum Error {
     Io(io::Error),
     Parse(ParseError),
-    Render(tinytemplate::error::Error),
+    Render(tera::Error),
     Config(serde_yaml::Error),
     Class(ClassError),
 }
@@ -49,8 +49,8 @@ impl From<ParseError> for Error {
     }
 }
 
-impl From<tinytemplate::error::Error> for Error {
-    fn from(e: tinytemplate::error::Error) -> Error {
+impl From<tera::Error> for Error {
+    fn from(e: tera::Error) -> Error {
         Error::Render(e)
     }
 }
