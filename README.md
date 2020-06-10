@@ -479,7 +479,7 @@ downloads: {
 # Parser definitions: these parsers are used by multiple feeds, so we
 # use YAML's anchors and aliases feature to avoid repetition.
 
-.one_range_per_line_hash_comments: &one_range_per_line_hash_comments {
+one_range_per_line_hash_comments: &one_range_per_line_hash_comments {
   ranges: {
     one_per_line: {
       comment: "#",
@@ -487,7 +487,7 @@ downloads: {
   },
 }
 
-.one_range_per_line_semicolon_comments: &one_range_per_line_semicolon_comments {
+one_range_per_line_semicolon_comments: &one_range_per_line_semicolon_comments {
   ranges: {
     one_per_line: {
       comment: ";",
