@@ -431,9 +431,31 @@ impl<'a, T> Iterator for AggregateIterator<'a, T> {
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Entry<T> {
-    pub priority: usize,
+    #[serde(skip_serializing)]
+    order: i32,
+    pub priority: u16,
     pub kind: Option<String>,
     pub class: String,
     pub protocol: String,
     pub range: T,
+}
+
+impl<T> Entry<T> {
+    pub fn new(
+        priority: u16,
+        kind: Option<String>,
+        class: String,
+        protocol: String,
+        range: T,
+    ) -> Entry<T> {
+        let order = i32::from(priority) * -1;
+        Entry {
+            order,
+            priority,
+            kind,
+            class,
+            protocol,
+            range,
+        }
+    }
 }

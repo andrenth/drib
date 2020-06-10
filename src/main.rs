@@ -352,25 +352,19 @@ where
 
     let protocol = T::protocol();
 
-    // The `groups` map is sorted by descending priority. For each
-    // group, we remove every range that appears in higher priority
-    // groups. Its own ranges are then merged with the higher priority
-    // ones, to be removed from the next iteration's group.
-    for ((priority, kind), class_ranges) in groups {
-        let filtered = remove_higher_priority_ranges(&class_ranges, &acc);
+    // The `groups` map is sorted by ascending priority, so we iterate
+    // in reverse. For each group, we remove every range that appears
+    // in lower priority groups. Its own ranges are then merged with the
+    // accumulated ones, to be removed from the next iteration's group.
+    for ((priority, kind), class_ranges) in groups.iter().rev() {
+        let filtered = remove_lower_priority_ranges(&acc, &class_ranges);
 
         for (class, ranges) in filtered {
             for range in &ranges {
                 let kind = kind.map(|k| k.to_owned());
                 let class = class.to_owned();
                 let protocol = protocol.to_owned();
-                let entry = Entry {
-                    priority,
-                    kind,
-                    class,
-                    protocol,
-                    range,
-                };
+                let entry = Entry::new(*priority, kind, class, protocol, range);
                 res.insert(entry);
             }
         }
@@ -386,7 +380,7 @@ async fn fetch_groups<P, T>(
     path: P,
     download_path: P,
     groups: &Groups<T>,
-) -> Result<BTreeMap<(usize, Option<&str>), ClassRanges<T>>, anyhow::Error>
+) -> Result<BTreeMap<(u16, Option<&str>), ClassRanges<T>>, anyhow::Error>
 where
     P: AsRef<Path>,
     T: Net + Eq + Hash + Display + Send + Sync + 'static,
@@ -728,9 +722,9 @@ where
     Ok(addrs)
 }
 
-fn remove_higher_priority_ranges<N>(lower: &ClassRanges<N>, higher: &IpRange<N>) -> ClassRanges<N>
+fn remove_lower_priority_ranges<T>(higher: &IpRange<T>, lower: &ClassRanges<T>) -> ClassRanges<T>
 where
-    N: IpNet + Default,
+    T: IpNet + Default,
 {
     lower
         .iter()
@@ -738,7 +732,7 @@ where
         .collect()
 }
 
-fn merge_class_ranges<N: IpNet>(cr: &ClassRanges<N>) -> IpRange<N> {
+fn merge_class_ranges<T: IpNet>(cr: &ClassRanges<T>) -> IpRange<T> {
     cr.iter().fold(IpRange::new(), |rs, (_, r)| rs.merge(&r))
 }
 
@@ -794,13 +788,7 @@ where
             None
         };
         let protocol = T::protocol().to_owned();
-        let entry = Entry {
-            priority,
-            kind,
-            class,
-            protocol,
-            range,
-        };
+        let entry = Entry::new(priority, kind, class, protocol, range);
         aggr.insert(entry);
     }
 
@@ -967,7 +955,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 1,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -982,7 +970,7 @@ mod tests {
         config.ipv6.insert(
             "blacklist".to_string(),
             Group {
-                priority: 1,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -997,10 +985,10 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("1.2.3.4/32", "1", 1)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("1.2.3.4/32", "1", 10)]), diff.ipv4_insert);
         assert!(diff.ipv4_remove.is_empty());
 
-        assert_eq!(netvec(&[("abcd::1/128", "1", 1)]), diff.ipv6_insert);
+        assert_eq!(netvec(&[("abcd::1/128", "1", 10)]), diff.ipv6_insert);
         assert!(diff.ipv6_remove.is_empty());
     }
 
@@ -1013,7 +1001,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1028,7 +1016,7 @@ mod tests {
         config.ipv6.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1043,10 +1031,10 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("1.2.3.4/32", "1", 1)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("1.2.3.4/32", "1", 20)]), diff.ipv4_insert);
         assert!(diff.ipv4_remove.is_empty());
 
-        assert_eq!(netvec(&[("abcd::1/128", "1", 1)]), diff.ipv6_insert);
+        assert_eq!(netvec(&[("abcd::1/128", "1", 20)]), diff.ipv6_insert);
         assert!(diff.ipv6_remove.is_empty());
     }
 
@@ -1058,7 +1046,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1082,7 +1070,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1106,7 +1094,7 @@ mod tests {
         config.ipv6.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1130,7 +1118,7 @@ mod tests {
         config.ipv6.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1156,9 +1144,9 @@ mod tests {
 
         assert_eq!(
             netvec(&[
-                ("10.0.0.0/25", "2", 1),
-                ("10.1.1.1/32", "2", 1),
-                ("10.0.0.128/25", "1", 2),
+                ("10.0.0.0/25", "2", 20),
+                ("10.1.1.1/32", "2", 20),
+                ("10.0.0.128/25", "1", 10),
             ]),
             diff.ipv4_insert
         );
@@ -1166,9 +1154,9 @@ mod tests {
 
         assert_eq!(
             netvec(&[
-                ("aaaa::/17", "2", 1),
-                ("abcd::1/128", "2", 1),
-                ("aaaa:8000::/17", "1", 2),
+                ("aaaa::/17", "2", 20),
+                ("abcd::1/128", "2", 20),
+                ("aaaa:8000::/17", "1", 10),
             ]),
             diff.ipv6_insert
         );
@@ -1216,7 +1204,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1241,7 +1229,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1266,7 +1254,7 @@ mod tests {
         config.ipv6.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1291,7 +1279,7 @@ mod tests {
         config.ipv6.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1318,9 +1306,9 @@ mod tests {
 
         assert_eq!(
             netvec(&[
-                ("1.1.0.0/17", "2", 1),
-                ("1.1.128.0/17", "1", 2),
-                ("1.2.3.4/32", "1", 2),
+                ("1.1.0.0/17", "2", 20),
+                ("1.1.128.0/17", "1", 10),
+                ("1.2.3.4/32", "1", 10),
             ]),
             diff.ipv4_insert
         );
@@ -1328,9 +1316,9 @@ mod tests {
 
         assert_eq!(
             netvec(&[
-                ("aaaa::/17", "2", 1),
-                ("aaaa:8000::/17", "1", 2),
-                ("abcd::1/128", "1", 2),
+                ("aaaa::/17", "2", 20),
+                ("aaaa:8000::/17", "1", 10),
+                ("abcd::1/128", "1", 10),
             ]),
             diff.ipv6_insert
         );
@@ -1352,7 +1340,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1427,7 +1415,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1499,7 +1487,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1544,7 +1532,7 @@ mod tests {
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
-            netvec(&[("1.1.1.1/32", "1", 2), ("1.1.2.2/32", "1", 2)]),
+            netvec(&[("1.1.1.1/32", "1", 10), ("1.1.2.2/32", "1", 10)]),
             diff.ipv4_insert
         );
         assert!(diff.ipv4_remove.is_empty());
@@ -1559,8 +1547,8 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("1.1.1.2/32", "1", 2)]), diff.ipv4_insert);
-        assert_eq!(netvec(&[("1.1.1.1/32", "1", 2)]), diff.ipv4_remove);
+        assert_eq!(netvec(&[("1.1.1.2/32", "1", 10)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("1.1.1.1/32", "1", 10)]), diff.ipv4_remove);
 
         assert!(diff.ipv6_insert.is_empty());
         assert!(diff.ipv6_remove.is_empty());
@@ -1584,7 +1572,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1609,7 +1597,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1634,7 +1622,7 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("10.0.0.0/24", "1", 2)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("10.0.0.0/24", "1", 10)]), diff.ipv4_insert);
         assert!(diff.ipv4_remove.is_empty());
 
         // Add a subnetwork of the blacklisted network in the whitelist
@@ -1648,10 +1636,10 @@ mod tests {
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
-            netvec(&[("10.0.0.0/25", "2", 1), ("10.0.0.128/25", "1", 2)]),
+            netvec(&[("10.0.0.0/25", "2", 20), ("10.0.0.128/25", "1", 10)]),
             diff.ipv4_insert
         );
-        assert_eq!(netvec(&[("10.0.0.0/24", "1", 2)]), diff.ipv4_remove);
+        assert_eq!(netvec(&[("10.0.0.0/24", "1", 10)]), diff.ipv4_remove);
 
         assert!(diff.ipv6_insert.is_empty());
         assert!(diff.ipv6_remove.is_empty());
@@ -1667,7 +1655,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1682,7 +1670,7 @@ mod tests {
         config.ipv6.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1697,10 +1685,10 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("1.2.3.4/32", "1", 2)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("1.2.3.4/32", "1", 10)]), diff.ipv4_insert);
         assert!(diff.ipv4_remove.is_empty());
 
-        assert_eq!(netvec(&[("abcd::1/128", "1", 2)]), diff.ipv6_insert);
+        assert_eq!(netvec(&[("abcd::1/128", "1", 10)]), diff.ipv6_insert);
         assert!(diff.ipv6_remove.is_empty());
 
         // change the feeds' classes
@@ -1726,11 +1714,11 @@ mod tests {
         work(&config, Mode::Diff).await.expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
-        assert_eq!(netvec(&[("1.2.3.4/32", "2", 2)]), diff.ipv4_insert);
-        assert_eq!(netvec(&[("1.2.3.4/32", "1", 2)]), diff.ipv4_remove);
+        assert_eq!(netvec(&[("1.2.3.4/32", "2", 10)]), diff.ipv4_insert);
+        assert_eq!(netvec(&[("1.2.3.4/32", "1", 10)]), diff.ipv4_remove);
 
-        assert_eq!(netvec(&[("abcd::1/128", "2", 2)]), diff.ipv6_insert);
-        assert_eq!(netvec(&[("abcd::1/128", "1", 2)]), diff.ipv6_remove);
+        assert_eq!(netvec(&[("abcd::1/128", "2", 10)]), diff.ipv6_insert);
+        assert_eq!(netvec(&[("abcd::1/128", "1", 10)]), diff.ipv6_remove);
     }
 
     #[tokio::test]
@@ -1741,7 +1729,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1756,7 +1744,7 @@ mod tests {
         config.ipv4.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1780,7 +1768,7 @@ mod tests {
         config.ipv6.insert(
             "whitelist".to_string(),
             Group {
-                priority: 1,
+                priority: 20,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "1".to_string(),
@@ -1795,7 +1783,7 @@ mod tests {
         config.ipv6.insert(
             "blacklist".to_string(),
             Group {
-                priority: 2,
+                priority: 10,
                 kind: Some("kind".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1820,15 +1808,15 @@ mod tests {
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
-            netvec(&[("8.8.4.4/32", "2", 1), ("8.8.8.8/32", "2", 1)]),
+            netvec(&[("8.8.4.4/32", "2", 20), ("8.8.8.8/32", "2", 20)]),
             diff.ipv4_insert,
         );
         assert!(diff.ipv4_remove.is_empty());
 
         assert_eq!(
             netvec(&[
-                ("2001:4860:4860::8844/128", "2", 1),
-                ("2001:4860:4860::8888/128", "2", 1),
+                ("2001:4860:4860::8844/128", "2", 20),
+                ("2001:4860:4860::8888/128", "2", 20),
             ]),
             diff.ipv6_insert,
         );
@@ -1843,7 +1831,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist1".to_string(),
             Group {
-                priority: 1,
+                priority: 10,
                 kind: Some("foo".to_string()),
                 feeds: HashMap::from_iter(vec![
                     (
@@ -1867,7 +1855,7 @@ mod tests {
         config.ipv4.insert(
             "whitelist2".to_string(),
             Group {
-                priority: 2,
+                priority: 20,
                 kind: Some("bar".to_string()),
                 feeds: HashMap::from_iter(vec![(
                     "3".to_string(),
@@ -1935,6 +1923,7 @@ mod tests {
 ipv4_remove: [
 {%- for entry in ipv4.remove %}
   {
+    order: -{{entry.priority}},
     priority: {{entry.priority}},
     kind: "{{entry.kind}}",
     class: "{{entry.class}}",
@@ -1947,6 +1936,7 @@ ipv4_remove: [
 ipv4_insert: [
 {%- for entry in ipv4.insert %}
   {
+    order: -{{entry.priority}},
     priority: {{entry.priority}},
     kind: "{{entry.kind}}",
     class: "{{entry.class}}",
@@ -1959,6 +1949,7 @@ ipv4_insert: [
 ipv6_remove: [
 {%- for entry in ipv6.remove %}
   {
+    order: -{{entry.priority}},
     priority: {{entry.priority}},
     kind: "{{entry.kind}}",
     class: "{{entry.class}}",
@@ -1971,6 +1962,7 @@ ipv6_remove: [
 ipv6_insert: [
 {%- for entry in ipv6.insert %}
   {
+    order: -{{entry.priority}},
     priority: {{entry.priority}},
     kind: "{{entry.kind}}",
     class: "{{entry.class}}",
@@ -2012,7 +2004,7 @@ ipv6_insert: [
         }
     }
 
-    fn netvec<'a, T: Net>(nets: &[(&str, &str, usize)]) -> Vec<Entry<T>>
+    fn netvec<'a, T: Net>(nets: &[(&str, &str, u16)]) -> Vec<Entry<T>>
     where
         T: Debug + Ord + FromStr<Err = AddrParseError>,
     {
@@ -2020,13 +2012,14 @@ ipv6_insert: [
         let protocol = T::protocol();
         for (net, class, priority) in nets {
             let range = net.parse::<T>().unwrap();
-            vec.push(Entry {
-                priority: *priority,
-                kind: Some("kind".to_string()),
-                class: class.to_string(),
-                protocol: protocol.to_string(),
+            let entry = Entry::new(
+                *priority,
+                Some("kind".to_string()),
+                class.to_string(),
+                protocol.to_string(),
                 range,
-            });
+            );
+            vec.push(entry);
         }
         vec.sort();
         vec

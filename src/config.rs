@@ -57,7 +57,7 @@ pub type Groups<T> = HashMap<String, Group<T>>;
 
 #[derive(Debug, Deserialize)]
 pub struct Group<T> {
-    pub priority: usize,
+    pub priority: u16,
     pub kind: Option<String>,
 
     #[serde(flatten)]
