@@ -2,6 +2,7 @@ use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
+use std::io::ErrorKind;
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -10,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{crate_name, crate_version, Clap};
+use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::{IpNet, IpRange};
 use lazy_static::lazy_static;
 use log::Level;
@@ -30,7 +32,7 @@ use drib::config::{
     ChunkedTemplates, Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source,
     Templates,
 };
-use drib::error::ClassError;
+use drib::error::{ClassIntersectionError, ConfigError};
 use drib::output::{Aggregate, Bootstrap, Changes, Diff, Entry};
 use drib::parser::{Domain, Net, Parse, ParseError};
 
@@ -39,6 +41,7 @@ const IPV4_DIR: &'static str = "ipv4";
 const IPV6_DIR: &'static str = "ipv6";
 const RESOLVED_DIR: &'static str = "resolved";
 const AGGREGATE_FILE: &'static str = "aggregate";
+const OLD_AGGREGATE_EXTENSION: &'static str = "old";
 
 type ClassRanges<T> = HashMap<String, IpRange<T>>;
 
@@ -59,10 +62,18 @@ struct Opts {
 
 #[derive(Debug, Copy, Clone, Clap)]
 enum Mode {
-    #[clap(about = "Bootstrap mode")]
-    Bootstrap,
-    #[clap(about = "Diff mode")]
-    Diff,
+    #[clap(about = "aggregate mode")]
+    Aggregate,
+    #[clap(about = "bootstrap mode")]
+    Bootstrap(NoDownload),
+    #[clap(about = "diff mode")]
+    Diff(NoDownload),
+}
+
+#[derive(Debug, Clone, Copy, Clap)]
+struct NoDownload {
+    #[clap(long, about = "use previously generated aggregate")]
+    no_download: bool,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -128,48 +139,154 @@ fn load_config<P: AsRef<Path>>(path: P) -> Result<Config, anyhow::Error> {
     Ok(config)
 }
 
+struct Paths {
+    ipv4: PathBuf,
+    ipv4_aggregate: PathBuf,
+    ipv6: PathBuf,
+    ipv6_aggregate: PathBuf,
+    downloads: PathBuf,
+}
+
+impl<'a> From<&'a Config> for Paths {
+    fn from(config: &Config) -> Paths {
+        let path = &config.state_dir;
+        let ipv4 = path.join(IPV4_DIR);
+        let ipv6 = path.join(IPV6_DIR);
+        let downloads = path.join(DOWNLOAD_DIR);
+
+        let (ipv4_aggregate, ipv6_aggregate) = config
+            .aggregate
+            .as_ref()
+            .map(|paths| (paths.ipv4.clone(), paths.ipv6.clone()))
+            .unwrap_or_else(|| (ipv4.join(AGGREGATE_FILE), ipv6.join(AGGREGATE_FILE)));
+
+        Paths {
+            ipv4,
+            ipv4_aggregate,
+            ipv6,
+            ipv6_aggregate,
+            downloads,
+        }
+    }
+}
+
 async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
     let path = &config.state_dir;
     fs::create_dir_all(path)
         .await
         .with_context(|| format!("failed to create protocol path '{}'", path.display()))?;
 
-    let download_path = path.join(DOWNLOAD_DIR);
-    download(&download_path, &config.downloads).await?;
+    let paths = Paths::from(config);
 
-    let ipv4_path = path.join(IPV4_DIR);
-    let ipv6_path = path.join(IPV6_DIR);
+    let (new_ipv4, new_ipv6) = match mode {
+        Mode::Aggregate => fetch_aggregates(&paths, &config).await?,
+        Mode::Bootstrap(NoDownload { no_download }) if config.bootstrap.is_some() => {
+            let (ipv4, ipv6) = if no_download {
+                let ipv4 = load_aggregate(&paths.ipv4_aggregate)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load ipv4 aggregate from '{}'",
+                            &paths.ipv4.display()
+                        )
+                    })?;
+                let ipv6 = load_aggregate(&paths.ipv6_aggregate)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load ipv6 aggregate from '{}'",
+                            &paths.ipv6.display()
+                        )
+                    })?;
+                (ipv4, ipv6)
+            } else {
+                fetch_aggregates(&paths, &config).await?
+            };
 
-    let new_ipv4_aggregate = fetch_aggregate(&ipv4_path, &download_path, &config.ipv4).await?;
-    let new_ipv6_aggregate = fetch_aggregate(&ipv6_path, &download_path, &config.ipv6).await?;
+            let bootstrap = Bootstrap::new(&ipv4, &ipv6);
+            render_bootstrap(&bootstrap, config.bootstrap.as_ref().unwrap()).await?;
 
-    match mode {
-        Mode::Bootstrap => {
-            let bootstrap = Bootstrap::new(&new_ipv4_aggregate, &new_ipv6_aggregate);
-            render_bootstrap(&bootstrap, &config.bootstrap).await?;
+            (ipv4, ipv6)
         }
-        Mode::Diff => {
-            let cur_ipv4_aggregate = load_aggregate(&ipv4_path).await?;
-            let cur_ipv6_aggregate = load_aggregate(&ipv6_path).await?;
+        Mode::Bootstrap(_) => {
+            return Err(ConfigError::MissingSetting("bootstrap".to_owned()).into());
+        }
+        Mode::Diff(NoDownload { no_download }) if config.diff.is_some() => {
+            let ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6)) = if no_download {
+                let new_ipv4 = load_aggregate(&paths.ipv4_aggregate)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load new ipv4 aggregate from '{}'",
+                            &paths.ipv4.display()
+                        )
+                    })?;
+                let new_ipv6 = load_aggregate(&paths.ipv6_aggregate)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load new ipv6 aggregate from '{}'",
+                            &paths.ipv6.display()
+                        )
+                    })?;
 
-            let ipv4_insert = &new_ipv4_aggregate - &cur_ipv4_aggregate;
-            let ipv6_insert = &new_ipv6_aggregate - &cur_ipv6_aggregate;
+                let cur_ipv4 = load_aggregate(old_aggregate_path(&paths.ipv4_aggregate))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load old ipv4 aggregate from '{}'",
+                            &paths.ipv4.display()
+                        )
+                    })?;
+                let cur_ipv6 = load_aggregate(old_aggregate_path(&paths.ipv6_aggregate))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to load old ipv6 aggregate from '{}'",
+                            &paths.ipv6.display()
+                        )
+                    })?;
 
-            let ipv4_remove = &cur_ipv4_aggregate - &new_ipv4_aggregate;
-            let ipv6_remove = &cur_ipv6_aggregate - &new_ipv6_aggregate;
+                ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
+            } else {
+                let (new_ipv4, new_ipv6) = fetch_aggregates(&paths, &config).await?;
+                let cur_ipv4 = load_aggregate(&paths.ipv4_aggregate).await?;
+                let cur_ipv6 = load_aggregate(&paths.ipv6_aggregate).await?;
+
+                ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
+            };
+
+            let (ipv4_insert, ipv4_remove) = (&new_ipv4 - &cur_ipv4, &cur_ipv4 - &new_ipv4);
+            let (ipv6_insert, ipv6_remove) = (&new_ipv6 - &cur_ipv6, &cur_ipv6 - &new_ipv6);
 
             let diff = Diff {
                 ipv4: Changes::from_aggregates(&ipv4_insert, &ipv4_remove),
                 ipv6: Changes::from_aggregates(&ipv6_insert, &ipv6_remove),
             };
-            render_diff(diff, &config.diff).await?;
-        }
-    }
+            render_diff(diff, config.diff.as_ref().unwrap()).await?;
 
-    save_aggregate(&ipv4_path.join(AGGREGATE_FILE), &new_ipv4_aggregate).await?;
-    save_aggregate(&ipv6_path.join(AGGREGATE_FILE), &new_ipv6_aggregate).await?;
+            (new_ipv4, new_ipv6)
+        }
+        Mode::Diff(_) => {
+            return Err(ConfigError::MissingSetting("diff".to_owned()).into());
+        }
+    };
+
+    save_aggregates(&paths, &new_ipv4, &new_ipv6).await?;
 
     Ok(())
+}
+
+async fn fetch_aggregates(
+    paths: &Paths,
+    config: &Config,
+) -> Result<(Aggregate<Ipv4Net>, Aggregate<Ipv6Net>), anyhow::Error> {
+    download(&paths.downloads, &config.downloads).await?;
+
+    let new_ipv4_aggregate = fetch_aggregate(&paths.ipv4, &paths.downloads, &config.ipv4).await?;
+    let new_ipv6_aggregate = fetch_aggregate(&paths.ipv6, &paths.downloads, &config.ipv6).await?;
+
+    Ok((new_ipv4_aggregate, new_ipv6_aggregate))
 }
 
 async fn download<P: AsRef<Path>>(path: P, downloads: &Downloads) -> Result<(), anyhow::Error> {
@@ -187,6 +304,36 @@ async fn download<P: AsRef<Path>>(path: P, downloads: &Downloads) -> Result<(), 
         }
     }
     Ok(())
+}
+
+async fn save_aggregates(
+    paths: &Paths,
+    ipv4: &Aggregate<Ipv4Net>,
+    ipv6: &Aggregate<Ipv6Net>,
+) -> Result<(), io::Error> {
+    rename_aggregate(&paths.ipv4_aggregate).await?;
+    save_aggregate(&paths.ipv4_aggregate, &ipv4).await?;
+
+    rename_aggregate(&paths.ipv6_aggregate).await?;
+    save_aggregate(&paths.ipv6_aggregate, &ipv6).await?;
+
+    Ok(())
+}
+
+async fn rename_aggregate<P: AsRef<Path>>(path: P) -> Result<(), io::Error> {
+    let old = old_aggregate_path(&path);
+
+    match fs::rename(&path, &old).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn old_aggregate_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let mut old = PathBuf::from(path.as_ref());
+    old.set_extension(OLD_AGGREGATE_EXTENSION);
+    old
 }
 
 #[derive(Serialize)]
@@ -331,7 +478,7 @@ where
 
 async fn fetch_aggregate<P, T>(
     path: P,
-    download_path: P,
+    downloads_path: P,
     groups: &Groups<T>,
 ) -> Result<Aggregate<T>, anyhow::Error>
 where
@@ -345,7 +492,7 @@ where
         )
     })?;
 
-    let groups = fetch_groups(&path, &download_path, groups).await?;
+    let groups = fetch_groups(&path, &downloads_path, groups).await?;
 
     let mut res = Aggregate::new();
     let mut acc = IpRange::new();
@@ -378,7 +525,7 @@ where
 
 async fn fetch_groups<P, T>(
     path: P,
-    download_path: P,
+    downloads_path: P,
     groups: &Groups<T>,
 ) -> Result<BTreeMap<(u16, Option<&str>), ClassRanges<T>>, anyhow::Error>
 where
@@ -392,7 +539,7 @@ where
         fs::create_dir_all(&path)
             .await
             .with_context(|| format!("failed to create group directory '{}'", path.display()))?;
-        let class_ranges = fetch_feed_ranges(&path, &download_path, &group.feeds).await?;
+        let class_ranges = fetch_feed_ranges(&path, &downloads_path, &group.feeds).await?;
         res.insert((group.priority, group.kind.as_deref()), class_ranges);
     }
 
@@ -401,7 +548,7 @@ where
 
 async fn fetch_feed_ranges<P1, P2, T>(
     path: P1,
-    download_path: P2,
+    downloads_path: P2,
     feeds: &Feeds<T>,
 ) -> Result<ClassRanges<T>, anyhow::Error>
 where
@@ -413,12 +560,12 @@ where
 
     for (name, feed) in feeds {
         let path = PathBuf::from(path.as_ref());
-        let download_path = PathBuf::from(download_path.as_ref());
+        let downloads_path = PathBuf::from(downloads_path.as_ref());
         let name = name.clone();
         let feed = feed.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let res = fetch_feed(&path, &download_path, &name, &feed).await;
+            let res = fetch_feed(&path, &downloads_path, &name, &feed).await;
             tx.send(res.map(|ranges| (feed.class.clone(), ranges)))
                 .expect("send range set failed");
         });
@@ -444,7 +591,7 @@ where
 
 async fn fetch_feed<P1, P2, T>(
     path: P1,
-    download_path: P2,
+    downloads_path: P2,
     name: &str,
     feed: &Feed<T>,
 ) -> Result<HashSet<T>, anyhow::Error>
@@ -488,7 +635,7 @@ where
                 .with_context(|| format!("{}: failed to parse feed", name))
         }
         Source::Download(ref src) => {
-            let path = download_path.as_ref().join(&src.name);
+            let path = downloads_path.as_ref().join(&src.name);
             let data = fs::read_to_string(&path).await.with_context(|| {
                 format!(
                     "{}: failed to read download source {} from '{}'",
@@ -741,8 +888,6 @@ where
     P: AsRef<Path>,
     T: Hash + Net,
 {
-    let path = path.as_ref().join(AGGREGATE_FILE);
-
     let data = match fs::read_to_string(&path).await {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Aggregate::new()),
@@ -755,9 +900,12 @@ where
         let parts: Vec<_> = line.split_whitespace().collect();
         let len = parts.len();
         if len < 3 || len > 4 {
-            return Err(
-                ParseError(format!("malformed line: '{}' ({})", line, path.display())).into(),
-            );
+            return Err(ParseError(format!(
+                "malformed line: '{}' ({})",
+                line,
+                path.as_ref().display()
+            ))
+            .into());
         }
         let range = parts[0]
             .parse()
@@ -767,7 +915,7 @@ where
                     "failed to parse network from '{}' in line '{}' ({})",
                     parts[0],
                     line,
-                    path.display(),
+                    path.as_ref().display(),
                 )
             })?;
         let priority = parts[1]
@@ -778,7 +926,7 @@ where
                     "failed to parse priority from '{}' in line '{}' ({})",
                     parts[1],
                     line,
-                    path.display(),
+                    path.as_ref().display(),
                 )
             })?;
         let class = parts[2].to_owned();
@@ -796,7 +944,7 @@ where
 }
 
 // Ensure no network is associated to more than one class.
-fn validate_class_ranges_dont_intersect<N>(m: &ClassRanges<N>) -> Result<(), ClassError>
+fn validate_class_ranges_dont_intersect<N>(m: &ClassRanges<N>) -> Result<(), ConfigError>
 where
     N: IpNet + Display,
 {
@@ -812,10 +960,11 @@ where
             if intersection.len() == 0 {
                 continue;
             }
-            return Err(ClassError {
+            let e = ClassIntersectionError {
                 classes: (c1.to_string(), c2.to_string()),
                 intersection,
-            });
+            };
+            return Err(ConfigError::ClassIntersection(e));
         }
     }
     Ok(())
@@ -937,7 +1086,9 @@ mod tests {
         let tmp = TempDir::new("drib").expect("tempdir failed");
         let config = test_config(tmp.path()).await;
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert!(diff.ipv4_remove.is_empty());
@@ -982,7 +1133,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("1.2.3.4/32", "1", 10)]), diff.ipv4_insert);
@@ -1028,7 +1181,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("1.2.3.4/32", "1", 20)]), diff.ipv4_insert);
@@ -1139,7 +1294,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
@@ -1301,7 +1458,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
@@ -1398,7 +1557,7 @@ mod tests {
             },
         );
 
-        assert!(work(&config, Mode::Diff).await.is_err());
+        assert!(work(&config, diff_mode_with_download()).await.is_err());
         assert!(tx.send(()).is_ok());
     }
 
@@ -1456,10 +1615,14 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
 
         // Download again
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert!(diff.ipv4_insert.is_empty());
@@ -1528,7 +1691,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
@@ -1544,7 +1709,9 @@ mod tests {
         }
 
         // Download again
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("1.1.1.2/32", "1", 10)]), diff.ipv4_insert);
@@ -1619,7 +1786,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("10.0.0.0/24", "1", 10)]), diff.ipv4_insert);
@@ -1632,7 +1801,9 @@ mod tests {
         }
 
         // Download again
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
@@ -1682,7 +1853,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("1.2.3.4/32", "1", 10)]), diff.ipv4_insert);
@@ -1711,7 +1884,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(netvec(&[("1.2.3.4/32", "2", 10)]), diff.ipv4_insert);
@@ -1804,7 +1979,9 @@ mod tests {
             },
         );
 
-        work(&config, Mode::Diff).await.expect("work failed");
+        work(&config, diff_mode_with_download())
+            .await
+            .expect("work failed");
         let diff = parse_diff(&config).await.expect("parse diff failed");
 
         assert_eq!(
@@ -1867,8 +2044,8 @@ mod tests {
             },
         );
 
-        match work(&config, Mode::Diff).await {
-            Err(err) => match err.root_cause().downcast_ref::<ClassError>() {
+        match work(&config, diff_mode_with_download()).await {
+            Err(err) => match err.root_cause().downcast_ref::<ClassIntersectionError>() {
                 Some(e) => {
                     let mut classes = vec![e.classes.0.clone(), e.classes.1.clone()];
                     classes.sort();
@@ -1986,17 +2163,15 @@ ipv6_insert: [
             core_threads: None,
             max_threads: None,
 
-            bootstrap: Templates {
-                input: PathBuf::default(),
-                output: "".to_string(),
-            },
-            diff: ChunkedTemplates {
+            aggregate: None,
+            bootstrap: None,
+            diff: Some(ChunkedTemplates {
                 templates: Templates {
                     input: PathBuf::from(&template_path),
                     output: format!("{}/diff.out", path.display()),
                 },
                 max_ranges_per_file: None,
-            },
+            }),
 
             downloads: HashMap::new(),
             ipv4: HashMap::new(),
@@ -2034,8 +2209,12 @@ ipv6_insert: [
     }
 
     async fn parse_diff(config: &Config) -> Result<RenderedDiff, anyhow::Error> {
-        let data = fs::read_to_string(&config.diff.templates.output).await?;
+        let data = fs::read_to_string(&config.diff.as_ref().unwrap().templates.output).await?;
         let diff = serde_yaml::from_str(&data)?;
         Ok(diff)
+    }
+
+    fn diff_mode_with_download() -> Mode {
+        Mode::Diff(NoDownload { no_download: false })
     }
 }
