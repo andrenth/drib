@@ -3,61 +3,24 @@ use std::fmt;
 use std::ops::Sub;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use bincode;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::fs;
 use tokio::io;
 
-use crate::parser::{Net, ParseError};
+use crate::parser::Net;
+use crate::util::safe_write;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Aggregate<T: Ord> {
     pub ranges: BTreeSet<Entry<T>>,
 }
 
-impl<T: Ord + Net> Aggregate<T> {
+impl<T: Ord> Aggregate<T> {
     pub fn new() -> Aggregate<T> {
         Aggregate {
             ranges: BTreeSet::new(),
         }
-    }
-
-    pub async fn load<P>(path: P) -> Result<Aggregate<T>, AggregateLoadError>
-    where
-        P: AsRef<Path>,
-    {
-        let data = match fs::read_to_string(&path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Aggregate::new()),
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut aggr = Aggregate::new();
-
-        for line in data.lines() {
-            let parts: Vec<_> = line.split_whitespace().collect();
-            let len = parts.len();
-            if len < 3 || len > 4 {
-                return Err(ParseError(format!(
-                    "malformed line: '{}' ({})",
-                    line,
-                    path.as_ref().display()
-                ))
-                .into());
-            }
-            let range = parts[0].parse().map_err(|e| ParseError::from(e))?;
-            let priority = parts[1].parse().map_err(ParseError::from)?;
-            let class = parts[2].to_owned();
-            let kind = if len == 4 {
-                Some(parts[3].to_owned())
-            } else {
-                None
-            };
-            let protocol = T::protocol().to_owned();
-            let entry = Entry::new(priority, kind, class, protocol, range);
-            aggr.insert(entry);
-        }
-
-        Ok(aggr)
     }
 
     pub fn insert(&mut self, entry: Entry<T>) -> bool {
@@ -75,9 +38,34 @@ impl<T: Ord + Net> Aggregate<T> {
     }
 }
 
+impl<T: std::fmt::Debug + Ord + Serialize + DeserializeOwned> Aggregate<T> {
+    pub async fn load<P>(path: P) -> Result<Aggregate<T>, AggregateLoadError>
+    where
+        P: AsRef<Path>,
+    {
+        let data = match fs::read(&path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Aggregate::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let aggr = bincode::deserialize(&data)?;
+        Ok(aggr)
+    }
+
+    pub async fn save<P>(&self, path: P) -> Result<(), AggregateSaveError>
+    where
+        P: AsRef<Path>,
+        T: Ord + fmt::Display,
+    {
+        let data = bincode::serialize(self)?;
+        safe_write(&path, &data).await?;
+        Ok(())
+    }
+}
+
 impl<T> Sub<&'_ Aggregate<T>> for &'_ Aggregate<T>
 where
-    T: Clone + Ord,
+    T: Net + Clone,
 {
     type Output = Aggregate<T>;
 
@@ -113,7 +101,6 @@ impl<'a, T> Iterator for AggregateIterator<'a, T> {
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Entry<T> {
-    #[serde(skip_serializing)]
     order: i32,
     pub priority: u16,
     pub kind: Option<String>,
@@ -145,14 +132,14 @@ impl<T> Entry<T> {
 #[derive(Debug)]
 pub enum AggregateLoadError {
     Io(io::Error),
-    Parse(ParseError),
+    Deserialize(bincode::Error),
 }
 
 impl fmt::Display for AggregateLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
-            AggregateLoadError::Io(e) => write!(f, "i/o error: {}", e),
-            AggregateLoadError::Parse(e) => write!(f, "parse error: {}", e),
+            AggregateLoadError::Io(e) => write!(f, "load aggregate i/o error: {}", e),
+            AggregateLoadError::Deserialize(e) => write!(f, "parse aggregate error: {}", e),
         }
     }
 }
@@ -161,7 +148,7 @@ impl std::error::Error for AggregateLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AggregateLoadError::Io(e) => Some(e),
-            AggregateLoadError::Parse(e) => Some(e),
+            AggregateLoadError::Deserialize(e) => Some(e),
         }
     }
 }
@@ -172,8 +159,44 @@ impl From<io::Error> for AggregateLoadError {
     }
 }
 
-impl From<ParseError> for AggregateLoadError {
-    fn from(e: ParseError) -> AggregateLoadError {
-        AggregateLoadError::Parse(e)
+impl From<bincode::Error> for AggregateLoadError {
+    fn from(e: bincode::Error) -> AggregateLoadError {
+        AggregateLoadError::Deserialize(e)
+    }
+}
+
+#[derive(Debug)]
+pub enum AggregateSaveError {
+    Io(io::Error),
+    Serialize(bincode::Error),
+}
+
+impl fmt::Display for AggregateSaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            AggregateSaveError::Io(e) => write!(f, "save aggregate i/o error: {}", e),
+            AggregateSaveError::Serialize(e) => write!(f, "aggregate serialize error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for AggregateSaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AggregateSaveError::Io(e) => Some(e),
+            AggregateSaveError::Serialize(e) => Some(e),
+        }
+    }
+}
+
+impl From<io::Error> for AggregateSaveError {
+    fn from(e: io::Error) -> AggregateSaveError {
+        AggregateSaveError::Io(e)
+    }
+}
+
+impl From<bincode::Error> for AggregateSaveError {
+    fn from(e: bincode::Error) -> AggregateSaveError {
+        AggregateSaveError::Serialize(e)
     }
 }

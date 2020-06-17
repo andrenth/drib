@@ -23,7 +23,7 @@ use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::AsyncResolver;
 use url::Url;
 
-use drib::aggregate::{Aggregate, Entry};
+use drib::aggregate::{Aggregate, AggregateSaveError, Entry};
 use drib::config::{Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source};
 use drib::error::{ClassIntersectionError, ConfigError};
 use drib::output::{render_bootstrap, render_diff, Bootstrap, Changes, Diff};
@@ -316,12 +316,12 @@ async fn save_aggregates(
     paths: &Paths,
     ipv4: &Aggregate<Ipv4Net>,
     ipv6: &Aggregate<Ipv6Net>,
-) -> Result<(), io::Error> {
+) -> Result<(), AggregateSaveError> {
     rename_aggregate(&paths.ipv4_aggregate).await?;
-    save_aggregate(&paths.ipv4_aggregate, &ipv4).await?;
+    ipv4.save(&paths.ipv4_aggregate).await?;
 
     rename_aggregate(&paths.ipv6_aggregate).await?;
-    save_aggregate(&paths.ipv6_aggregate, &ipv6).await?;
+    ipv6.save(&paths.ipv6_aggregate).await?;
 
     Ok(())
 }
@@ -773,33 +773,6 @@ where
             return Err(ConfigError::ClassIntersection(e));
         }
     }
-    Ok(())
-}
-
-async fn save_aggregate<P, T>(path: P, aggregate: &Aggregate<T>) -> Result<(), io::Error>
-where
-    P: AsRef<Path>,
-    T: Ord + Display,
-{
-    use std::io::Write;
-
-    let mut buf = Vec::new();
-    for entry in &aggregate.ranges {
-        if let Some(ref k) = entry.kind {
-            write!(
-                &mut buf,
-                "{} {} {} {}\n",
-                entry.range, entry.priority, entry.class, k
-            )?;
-            continue;
-        }
-        write!(
-            &mut buf,
-            "{} {} {}\n",
-            entry.range, entry.priority, entry.class
-        )?;
-    }
-    safe_write(&path, &buf).await?;
     Ok(())
 }
 
@@ -1584,6 +1557,7 @@ mod tests {
         }
 
         // Download again
+        std::thread::sleep(std::time::Duration::from_secs(10));
         work(&config, diff_mode_with_download())
             .await
             .expect("work failed");
