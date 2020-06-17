@@ -1,10 +1,22 @@
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Sub;
+use std::fmt;
+use std::hash::Hash;
+use std::path::{Path, PathBuf};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::IpNet;
-use serde::{Deserialize, Serialize};
+use lazy_static::lazy_static;
+use regex::Regex;
+use serde::Serialize;
+use tera::{self, Tera};
+use tokio::fs;
+use tokio::io;
+
+use crate::aggregate::{Aggregate, Entry};
+use crate::config::{ChunkedTemplates, Templates};
+use crate::parser::Net;
+use crate::util::safe_write;
 
 #[derive(Debug, Serialize)]
 pub struct Bootstrap<'a> {
@@ -237,7 +249,7 @@ impl<'a, T> Changes<'a, T> {
     }
 }
 
-impl<'a, T: IpNet> Changes<'a, T> {
+impl<'a, T: Net> Changes<'a, T> {
     pub fn from_aggregates(insert: &'a Aggregate<T>, remove: &'a Aggregate<T>) -> Changes<'a, T> {
         Changes {
             insert: aggregate_to_ranges(insert),
@@ -358,7 +370,7 @@ impl<'a, T> ChangesSlice<'a, T> {
     }
 }
 
-fn aggregate_to_ranges<'a, T: IpNet>(aggr: &'a Aggregate<T>) -> Vec<&'a Entry<T>> {
+fn aggregate_to_ranges<'a, T: Net>(aggr: &'a Aggregate<T>) -> Vec<&'a Entry<T>> {
     let mut ranges = Vec::new();
     for entry in aggr {
         ranges.push(entry);
@@ -366,96 +378,148 @@ fn aggregate_to_ranges<'a, T: IpNet>(aggr: &'a Aggregate<T>) -> Vec<&'a Entry<T>
     ranges
 }
 
-#[derive(Debug, Serialize)]
-pub struct Aggregate<T: Ord> {
-    pub ranges: BTreeSet<Entry<T>>,
+#[derive(Serialize)]
+struct Wrap<'a, T: Ord> {
+    ranges: &'a BTreeSet<&'a Entry<T>>,
 }
 
-impl<T: Ord> Aggregate<T> {
-    pub fn new() -> Aggregate<T> {
-        Aggregate {
-            ranges: BTreeSet::new(),
-        }
+pub async fn render_bootstrap<'a>(
+    bootstrap: &Bootstrap<'a>,
+    config: &Templates,
+) -> Result<(), RenderError> {
+    for (kind, ranges) in &bootstrap.ipv4 {
+        let w = Wrap { ranges };
+        render_aggregate(&config, &kind, "ipv4", &w).await?;
     }
-
-    pub fn insert(&mut self, entry: Entry<T>) -> bool {
-        self.ranges.insert(entry)
+    for (kind, ranges) in &bootstrap.ipv6 {
+        let w = Wrap { ranges };
+        render_aggregate(&config, &kind, "ipv6", &w).await?;
     }
-
-    pub fn len(&self) -> usize {
-        self.ranges.len()
-    }
-
-    pub fn iter(&self) -> AggregateIterator<T> {
-        AggregateIterator {
-            inner: self.ranges.iter(),
-        }
-    }
+    Ok(())
 }
 
-impl<T> Sub<&'_ Aggregate<T>> for &'_ Aggregate<T>
+async fn render_aggregate<'a, T>(
+    templates: &Templates,
+    kind: &Option<String>,
+    proto: &str,
+    aggregate: &Wrap<'a, T>,
+) -> Result<(), RenderError>
 where
-    T: Clone + Ord,
+    T: IpNet + Hash + Serialize,
 {
-    type Output = Aggregate<T>;
-
-    fn sub(self, rhs: &Aggregate<T>) -> Aggregate<T> {
-        let ranges = &self.ranges - &rhs.ranges;
-        Aggregate { ranges }
-    }
+    let kind = kind.as_deref().unwrap_or("");
+    let input = &templates.input;
+    let output = PathBuf::from(
+        templates
+            .output
+            .replace("{proto}", proto)
+            .replace("{kind}", kind),
+    );
+    render(input, &output, &aggregate).await?;
+    Ok(())
 }
 
-impl<'a, T> IntoIterator for &'a Aggregate<T>
+pub async fn render_diff<'a>(diff: Diff<'a>, config: &ChunkedTemplates) -> Result<(), RenderError> {
+    let size = config.max_ranges_per_file.unwrap_or(diff.len());
+
+    if size == 0 {
+        let input = &config.templates.input;
+        let output = PathBuf::from(config.templates.output.replace("{i}", "0"));
+        let diff = Diff::empty();
+        render(input, &output, &diff).await?;
+        return Ok(());
+    }
+
+    for (i, chunk) in diff.chunks(size).enumerate() {
+        let input = &config.templates.input;
+        let output = chunk_path(&config.templates.output, i);
+        render(input, &output, &chunk).await?;
+    }
+
+    Ok(())
+}
+
+async fn render<P, T>(template: P, output: P, data: &T) -> Result<(), RenderError>
 where
-    T: Ord,
+    P: AsRef<Path>,
+    T: Serialize,
 {
-    type Item = &'a Entry<T>;
-    type IntoIter = AggregateIterator<'a, T>;
+    let template = fs::read_to_string(&template).await?;
+    let mut tera = Tera::default();
+    let context = tera::Context::from_serialize(&data)?;
+    let res = tera.render_str(&template, &context)?;
 
-    fn into_iter(self) -> AggregateIterator<'a, T> {
-        self.iter()
+    safe_write(&output, res.as_bytes()).await?;
+    Ok(())
+}
+
+fn chunk_path(output: &str, i: usize) -> PathBuf {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r#"(\{(\d)*i\})"#).unwrap();
     }
+    let path = RE.replace_all(output, |cap: &regex::Captures| -> String {
+        let num_zeros: usize = cap.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
+        let s = i.to_string();
+        let n = num_zeros.saturating_sub(s.len());
+        let mut path = "0".repeat(max(0, n));
+        path.push_str(&s);
+        path
+    });
+    PathBuf::from(path.to_string())
 }
 
-pub struct AggregateIterator<'a, T> {
-    inner: std::collections::btree_set::Iter<'a, Entry<T>>,
+#[derive(Debug)]
+pub enum RenderError {
+    Io(io::Error),
+    Template(tera::Error),
 }
 
-impl<'a, T> Iterator for AggregateIterator<'a, T> {
-    type Item = &'a Entry<T>;
-
-    fn next(&mut self) -> Option<&'a Entry<T>> {
-        self.inner.next()
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct Entry<T> {
-    #[serde(skip_serializing)]
-    order: i32,
-    pub priority: u16,
-    pub kind: Option<String>,
-    pub class: String,
-    pub protocol: String,
-    pub range: T,
-}
-
-impl<T> Entry<T> {
-    pub fn new(
-        priority: u16,
-        kind: Option<String>,
-        class: String,
-        protocol: String,
-        range: T,
-    ) -> Entry<T> {
-        let order = i32::from(priority) * -1;
-        Entry {
-            order,
-            priority,
-            kind,
-            class,
-            protocol,
-            range,
+impl fmt::Display for RenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            RenderError::Io(e) => write!(f, "i/o error: {}", e),
+            RenderError::Template(e) => write!(f, "parse error: {}", e),
         }
+    }
+}
+
+impl std::error::Error for RenderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RenderError::Io(e) => Some(e),
+            RenderError::Template(e) => Some(e),
+        }
+    }
+}
+
+impl From<io::Error> for RenderError {
+    fn from(e: io::Error) -> RenderError {
+        RenderError::Io(e)
+    }
+}
+
+impl From<tera::Error> for RenderError {
+    fn from(e: tera::Error) -> RenderError {
+        RenderError::Template(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_path() {
+        assert_eq!(PathBuf::from("foo"), chunk_path("foo", 42));
+        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{i}", 42));
+        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{0i}", 42));
+        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{1i}", 42));
+        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{2i}", 42));
+        assert_eq!(PathBuf::from("foo042"), chunk_path("foo{3i}", 42));
+        assert_eq!(PathBuf::from("foo0042"), chunk_path("foo{4i}", 42));
+
+        assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{i}-{i}", 42));
+        assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{0i}-{0i}", 42));
+        assert_eq!(PathBuf::from("foo042-0042"), chunk_path("foo{3i}-{4i}", 42));
     }
 }

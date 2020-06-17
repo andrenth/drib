@@ -1,5 +1,4 @@
-use std::cmp::max;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 use std::io::ErrorKind;
@@ -13,28 +12,23 @@ use chrono::{DateTime, Utc};
 use clap::{crate_name, crate_version, Clap};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::{IpNet, IpRange};
-use lazy_static::lazy_static;
 use log::Level;
 use log::{debug, error, info, warn};
-use regex::Regex;
 use reqwest::{header::IF_MODIFIED_SINCE, Client, StatusCode};
-use serde::Serialize;
-use tera::{self, Tera};
-use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{self, AsyncWriteExt};
+use tokio::fs::{self, OpenOptions};
+use tokio::io;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::AsyncResolver;
 use url::Url;
 
-use drib::config::{
-    ChunkedTemplates, Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source,
-    Templates,
-};
+use drib::aggregate::{Aggregate, Entry};
+use drib::config::{Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source};
 use drib::error::{ClassIntersectionError, ConfigError};
-use drib::output::{Aggregate, Bootstrap, Changes, Diff, Entry};
+use drib::output::{render_bootstrap, render_diff, Bootstrap, Changes, Diff};
 use drib::parser::{Domain, Net, Parse, ParseError};
+use drib::util::safe_write;
 
 const DOWNLOAD_DIR: &'static str = "downloads";
 const IPV4_DIR: &'static str = "ipv4";
@@ -182,7 +176,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
         Mode::Aggregate => fetch_aggregates(&paths, &config).await?,
         Mode::Bootstrap(NoDownload { no_download }) if config.bootstrap.is_some() => {
             let (ipv4, ipv6) = if no_download {
-                let ipv4 = load_aggregate(&paths.ipv4_aggregate)
+                let ipv4 = Aggregate::load(&paths.ipv4_aggregate)
                     .await
                     .with_context(|| {
                         format!(
@@ -190,7 +184,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                             &paths.ipv4.display()
                         )
                     })?;
-                let ipv6 = load_aggregate(&paths.ipv6_aggregate)
+                let ipv6 = Aggregate::load(&paths.ipv6_aggregate)
                     .await
                     .with_context(|| {
                         format!(
@@ -204,6 +198,8 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
             };
 
             let bootstrap = Bootstrap::new(&ipv4, &ipv6);
+            info!("ipv4: +{}", bootstrap.ipv4_len());
+            info!("ipv6: +{}", bootstrap.ipv6_len());
             render_bootstrap(&bootstrap, config.bootstrap.as_ref().unwrap()).await?;
 
             (ipv4, ipv6)
@@ -213,7 +209,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
         }
         Mode::Diff(NoDownload { no_download }) if config.diff.is_some() => {
             let ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6)) = if no_download {
-                let new_ipv4 = load_aggregate(&paths.ipv4_aggregate)
+                let new_ipv4 = Aggregate::load(&paths.ipv4_aggregate)
                     .await
                     .with_context(|| {
                         format!(
@@ -221,7 +217,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                             &paths.ipv4.display()
                         )
                     })?;
-                let new_ipv6 = load_aggregate(&paths.ipv6_aggregate)
+                let new_ipv6 = Aggregate::load(&paths.ipv6_aggregate)
                     .await
                     .with_context(|| {
                         format!(
@@ -230,7 +226,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                         )
                     })?;
 
-                let cur_ipv4 = load_aggregate(old_aggregate_path(&paths.ipv4_aggregate))
+                let cur_ipv4 = Aggregate::load(old_aggregate_path(&paths.ipv4_aggregate))
                     .await
                     .with_context(|| {
                         format!(
@@ -238,7 +234,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                             &paths.ipv4.display()
                         )
                     })?;
-                let cur_ipv6 = load_aggregate(old_aggregate_path(&paths.ipv6_aggregate))
+                let cur_ipv6 = Aggregate::load(old_aggregate_path(&paths.ipv6_aggregate))
                     .await
                     .with_context(|| {
                         format!(
@@ -250,8 +246,8 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                 ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
             } else {
                 let (new_ipv4, new_ipv6) = fetch_aggregates(&paths, &config).await?;
-                let cur_ipv4 = load_aggregate(&paths.ipv4_aggregate).await?;
-                let cur_ipv6 = load_aggregate(&paths.ipv6_aggregate).await?;
+                let cur_ipv4 = Aggregate::load(&paths.ipv4_aggregate).await?;
+                let cur_ipv6 = Aggregate::load(&paths.ipv6_aggregate).await?;
 
                 ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
             };
@@ -263,6 +259,16 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                 ipv4: Changes::from_aggregates(&ipv4_insert, &ipv4_remove),
                 ipv6: Changes::from_aggregates(&ipv6_insert, &ipv6_remove),
             };
+            info!(
+                "ipv4: +{}, -{}",
+                diff.ipv4.insert.len(),
+                diff.ipv4.remove.len()
+            );
+            info!(
+                "ipv6: +{}, -{}",
+                diff.ipv6.insert.len(),
+                diff.ipv6.remove.len()
+            );
             render_diff(diff, config.diff.as_ref().unwrap()).await?;
 
             (new_ipv4, new_ipv6)
@@ -334,146 +340,6 @@ fn old_aggregate_path<P: AsRef<Path>>(path: P) -> PathBuf {
     let mut old = PathBuf::from(path.as_ref());
     old.set_extension(OLD_AGGREGATE_EXTENSION);
     old
-}
-
-#[derive(Serialize)]
-struct Wrap<'a, T: Ord> {
-    ranges: &'a BTreeSet<&'a Entry<T>>,
-}
-
-async fn render_bootstrap<'a>(
-    bootstrap: &Bootstrap<'a>,
-    config: &Templates,
-) -> Result<(), anyhow::Error> {
-    info!("ipv4: +{}", bootstrap.ipv4_len());
-    info!("ipv6: +{}", bootstrap.ipv6_len());
-    for (kind, ranges) in &bootstrap.ipv4 {
-        let w = Wrap { ranges };
-        render_aggregate(&config, &kind, "ipv4", &w)
-            .await
-            .context("failed to render ipv4 ranges")?;
-    }
-    for (kind, ranges) in &bootstrap.ipv6 {
-        let w = Wrap { ranges };
-        render_aggregate(&config, &kind, "ipv6", &w)
-            .await
-            .context("failed to render ipv4 ranges")?;
-    }
-    Ok(())
-}
-
-async fn render_aggregate<'a, T>(
-    templates: &Templates,
-    kind: &Option<String>,
-    proto: &str,
-    aggregate: &Wrap<'a, T>,
-) -> Result<(), anyhow::Error>
-where
-    T: IpNet + Hash + Serialize,
-{
-    let kind = kind.as_deref().unwrap_or("");
-    let input = &templates.input;
-    let output = PathBuf::from(
-        templates
-            .output
-            .replace("{proto}", proto)
-            .replace("{kind}", kind),
-    );
-    render(input, &output, &aggregate).await.with_context(|| {
-        format!(
-            "failed to render {} bootstrap from '{}' into '{}' (kind '{}')",
-            proto,
-            input.display(),
-            output.display(),
-            kind
-        )
-    })?;
-    Ok(())
-}
-
-async fn render_diff<'a>(diff: Diff<'a>, config: &ChunkedTemplates) -> Result<(), anyhow::Error> {
-    info!(
-        "ipv4: +{}, -{}",
-        diff.ipv4.insert.len(),
-        diff.ipv4.remove.len()
-    );
-    info!(
-        "ipv6: +{}, -{}",
-        diff.ipv6.insert.len(),
-        diff.ipv6.remove.len()
-    );
-
-    let size = config.max_ranges_per_file.unwrap_or(diff.len());
-
-    if size == 0 {
-        let input = &config.templates.input;
-        let output = PathBuf::from(config.templates.output.replace("{i}", "0"));
-        let diff = Diff::empty();
-        render(input, &output, &diff).await.with_context(|| {
-            format!(
-                "failed to render diff from '{}' into '{}' (chunk {})",
-                input.display(),
-                output.display(),
-                0
-            )
-        })?;
-        return Ok(());
-    }
-
-    for (i, chunk) in diff.chunks(size).enumerate() {
-        let input = &config.templates.input;
-        let output = chunk_path(&config.templates.output, i);
-        render(input, &output, &chunk).await.with_context(|| {
-            format!(
-                "failed to render diff from '{}' into '{}' (chunk {})",
-                input.display(),
-                output.display(),
-                i
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
-fn chunk_path(output: &str, i: usize) -> PathBuf {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r#"(\{(\d)*i\})"#).unwrap();
-    }
-    let path = RE.replace_all(output, |cap: &regex::Captures| -> String {
-        let num_zeros: usize = cap.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
-        let s = i.to_string();
-        let n = num_zeros.saturating_sub(s.len());
-        let mut path = "0".repeat(max(0, n));
-        path.push_str(&s);
-        path
-    });
-    PathBuf::from(path.to_string())
-}
-
-async fn render<P, T>(template: P, output: P, data: &T) -> Result<(), anyhow::Error>
-where
-    P: AsRef<Path>,
-    T: Serialize,
-{
-    let template = fs::read_to_string(&template).await.with_context(|| {
-        format!(
-            "failed to read template file '{}'",
-            template.as_ref().display()
-        )
-    })?;
-
-    let mut tera = Tera::default();
-    let context = tera::Context::from_serialize(&data)?;
-    let res = tera.render_str(&template, &context)?;
-
-    safe_write(&output, res.as_bytes()).await.with_context(|| {
-        format!(
-            "failed to write rendered file '{}'",
-            output.as_ref().display()
-        )
-    })?;
-    Ok(())
 }
 
 async fn fetch_aggregate<P, T>(
@@ -883,66 +749,6 @@ fn merge_class_ranges<T: IpNet>(cr: &ClassRanges<T>) -> IpRange<T> {
     cr.iter().fold(IpRange::new(), |rs, (_, r)| rs.merge(&r))
 }
 
-async fn load_aggregate<P, T>(path: P) -> Result<Aggregate<T>, anyhow::Error>
-where
-    P: AsRef<Path>,
-    T: Hash + Net,
-{
-    let data = match fs::read_to_string(&path).await {
-        Ok(data) => data,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Aggregate::new()),
-        Err(e) => return Err(e.into()),
-    };
-
-    let mut aggr = Aggregate::new();
-
-    for line in data.lines() {
-        let parts: Vec<_> = line.split_whitespace().collect();
-        let len = parts.len();
-        if len < 3 || len > 4 {
-            return Err(ParseError(format!(
-                "malformed line: '{}' ({})",
-                line,
-                path.as_ref().display()
-            ))
-            .into());
-        }
-        let range = parts[0]
-            .parse()
-            .map_err(|e| ParseError::from(e))
-            .with_context(|| {
-                format!(
-                    "failed to parse network from '{}' in line '{}' ({})",
-                    parts[0],
-                    line,
-                    path.as_ref().display(),
-                )
-            })?;
-        let priority = parts[1]
-            .parse()
-            .map_err(ParseError::from)
-            .with_context(|| {
-                format!(
-                    "failed to parse priority from '{}' in line '{}' ({})",
-                    parts[1],
-                    line,
-                    path.as_ref().display(),
-                )
-            })?;
-        let class = parts[2].to_owned();
-        let kind = if len == 4 {
-            Some(parts[3].to_owned())
-        } else {
-            None
-        };
-        let protocol = T::protocol().to_owned();
-        let entry = Entry::new(priority, kind, class, protocol, range);
-        aggr.insert(entry);
-    }
-
-    Ok(aggr)
-}
-
 // Ensure no network is associated to more than one class.
 fn validate_class_ranges_dont_intersect<N>(m: &ClassRanges<N>) -> Result<(), ConfigError>
 where
@@ -1008,19 +814,6 @@ fn setup_logger(level: &Level) {
     builder.init();
 }
 
-async fn safe_write<P: AsRef<Path>>(path: P, buf: &[u8]) -> Result<(), io::Error> {
-    let tmp = format!("{}.tmp", path.as_ref().display());
-
-    let mut file = File::create(&tmp).await?;
-    file.write_all(buf).await?;
-    file.sync_all().await?;
-    drop(file);
-
-    fs::rename(&tmp, &path).await?;
-
-    Ok(())
-}
-
 fn range_sub<N>(r1: &IpRange<N>, r2: &IpRange<N>) -> IpRange<N>
 where
     N: IpNet + Default,
@@ -1047,39 +840,29 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
 
-    use hyper::service::{make_service_fn, service_fn};
-    use hyper::{Body, Request, Response, Server};
+    use hyper::{
+        service::{make_service_fn, service_fn},
+        Body, Request, Response, Server,
+    };
     use ipnet::{AddrParseError, Ipv4Net, Ipv6Net};
     use log::Level;
     use rand::Rng;
     use serde::Deserialize;
     use tempdir::TempDir;
-    use tokio::sync::{
-        oneshot::{self, Sender},
-        RwLock,
+    use tokio::{
+        fs::File,
+        io::AsyncWriteExt,
+        sync::{
+            oneshot::{self, Sender},
+            RwLock,
+        },
+        task,
     };
-    use tokio::task;
 
     use drib::config::*;
-    use drib::output::*;
     use drib::parser::*;
 
     use super::*;
-
-    #[test]
-    fn test_chunk_path() {
-        assert_eq!(PathBuf::from("foo"), chunk_path("foo", 42));
-        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{i}", 42));
-        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{0i}", 42));
-        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{1i}", 42));
-        assert_eq!(PathBuf::from("foo42"), chunk_path("foo{2i}", 42));
-        assert_eq!(PathBuf::from("foo042"), chunk_path("foo{3i}", 42));
-        assert_eq!(PathBuf::from("foo0042"), chunk_path("foo{4i}", 42));
-
-        assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{i}-{i}", 42));
-        assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{0i}-{0i}", 42));
-        assert_eq!(PathBuf::from("foo042-0042"), chunk_path("foo{3i}-{4i}", 42));
-    }
 
     #[tokio::test]
     async fn test_empty_config() {
