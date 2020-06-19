@@ -4,7 +4,8 @@ use std::ops::Sub;
 use std::path::Path;
 
 use bincode;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use ipnet::{Ipv4Net, Ipv6Net};
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io;
 
@@ -35,31 +36,6 @@ impl<T: Ord> Aggregate<T> {
         AggregateIterator {
             inner: self.ranges.iter(),
         }
-    }
-}
-
-impl<T: std::fmt::Debug + Ord + Serialize + DeserializeOwned> Aggregate<T> {
-    pub async fn load<P>(path: P) -> Result<Aggregate<T>, AggregateLoadError>
-    where
-        P: AsRef<Path>,
-    {
-        let data = match fs::read(&path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Aggregate::new()),
-            Err(e) => return Err(e.into()),
-        };
-        let aggr = bincode::deserialize(&data)?;
-        Ok(aggr)
-    }
-
-    pub async fn save<P>(&self, path: P) -> Result<(), AggregateSaveError>
-    where
-        P: AsRef<Path>,
-        T: Ord + fmt::Display,
-    {
-        let data = bincode::serialize(self)?;
-        safe_write(&path, &data).await?;
-        Ok(())
     }
 }
 
@@ -199,4 +175,28 @@ impl From<bincode::Error> for AggregateSaveError {
     fn from(e: bincode::Error) -> AggregateSaveError {
         AggregateSaveError::Serialize(e)
     }
+}
+
+pub async fn serialize(
+    path: impl AsRef<Path>,
+    ipv4: &Aggregate<Ipv4Net>,
+    ipv6: &Aggregate<Ipv6Net>,
+) -> Result<(), AggregateSaveError> {
+    let data = bincode::serialize(&(ipv4, ipv6))?;
+    safe_write(&path, &data).await?;
+    Ok(())
+}
+
+pub async fn deserialize(
+    path: impl AsRef<Path>,
+) -> Result<(Aggregate<Ipv4Net>, Aggregate<Ipv6Net>), AggregateLoadError> {
+    let data = match fs::read(&path).await {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok((Aggregate::new(), Aggregate::new()))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let aggr = bincode::deserialize(&data)?;
+    Ok(aggr)
 }

@@ -23,7 +23,7 @@ use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::AsyncResolver;
 use url::Url;
 
-use drib::aggregate::{Aggregate, AggregateSaveError, Entry};
+use drib::aggregate::{self, Aggregate, AggregateSaveError, Entry};
 use drib::config::{Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source};
 use drib::error::{ClassIntersectionError, ConfigError};
 use drib::output::{render_bootstrap, render_diff, Bootstrap, Changes, Diff};
@@ -135,31 +135,19 @@ fn load_config(path: impl AsRef<Path>) -> Result<Config, anyhow::Error> {
 
 struct Paths {
     ipv4: PathBuf,
-    ipv4_aggregate: PathBuf,
     ipv6: PathBuf,
-    ipv6_aggregate: PathBuf,
+    aggregate: PathBuf,
     downloads: PathBuf,
 }
 
 impl<'a> From<&'a Config> for Paths {
     fn from(config: &Config) -> Paths {
         let path = &config.state_dir;
-        let ipv4 = path.join(IPV4_DIR);
-        let ipv6 = path.join(IPV6_DIR);
-        let downloads = path.join(DOWNLOAD_DIR);
-
-        let (ipv4_aggregate, ipv6_aggregate) = config
-            .aggregate
-            .as_ref()
-            .map(|paths| (paths.ipv4.clone(), paths.ipv6.clone()))
-            .unwrap_or_else(|| (ipv4.join(AGGREGATE_FILE), ipv6.join(AGGREGATE_FILE)));
-
         Paths {
-            ipv4,
-            ipv4_aggregate,
-            ipv6,
-            ipv6_aggregate,
-            downloads,
+            ipv4: path.join(IPV4_DIR),
+            ipv6: path.join(IPV6_DIR),
+            aggregate: path.join(AGGREGATE_FILE),
+            downloads: path.join(DOWNLOAD_DIR),
         }
     }
 }
@@ -176,23 +164,14 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
         Mode::Aggregate => fetch_aggregates(&paths, &config).await?,
         Mode::Bootstrap(NoDownload { no_download }) if config.bootstrap.is_some() => {
             let (ipv4, ipv6) = if no_download {
-                let ipv4 = Aggregate::load(&paths.ipv4_aggregate)
+                aggregate::deserialize(&paths.aggregate)
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to load ipv4 aggregate from '{}'",
-                            &paths.ipv4.display()
+                            "failed to load aggregates from '{}'",
+                            &paths.aggregate.display()
                         )
-                    })?;
-                let ipv6 = Aggregate::load(&paths.ipv6_aggregate)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to load ipv6 aggregate from '{}'",
-                            &paths.ipv6.display()
-                        )
-                    })?;
-                (ipv4, ipv6)
+                    })?
             } else {
                 fetch_aggregates(&paths, &config).await?
             };
@@ -209,47 +188,29 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
         }
         Mode::Diff(NoDownload { no_download }) if config.diff.is_some() => {
             let ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6)) = if no_download {
-                let new_ipv4 = Aggregate::load(&paths.ipv4_aggregate)
+                let new = aggregate::deserialize(&paths.aggregate)
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to load new ipv4 aggregate from '{}'",
-                            &paths.ipv4.display()
-                        )
-                    })?;
-                let new_ipv6 = Aggregate::load(&paths.ipv6_aggregate)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to load new ipv6 aggregate from '{}'",
-                            &paths.ipv6.display()
+                            "failed to load new aggregates from '{}'",
+                            &paths.aggregate.display()
                         )
                     })?;
 
-                let cur_ipv4 = Aggregate::load(old_aggregate_path(&paths.ipv4_aggregate))
+                let cur = aggregate::deserialize(old_aggregate_path(&paths.aggregate))
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to load old ipv4 aggregate from '{}'",
+                            "failed to load current aggregates from '{}'",
                             &paths.ipv4.display()
                         )
                     })?;
-                let cur_ipv6 = Aggregate::load(old_aggregate_path(&paths.ipv6_aggregate))
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to load old ipv6 aggregate from '{}'",
-                            &paths.ipv6.display()
-                        )
-                    })?;
 
-                ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
+                (new, cur)
             } else {
-                let (new_ipv4, new_ipv6) = fetch_aggregates(&paths, &config).await?;
-                let cur_ipv4 = Aggregate::load(&paths.ipv4_aggregate).await?;
-                let cur_ipv6 = Aggregate::load(&paths.ipv6_aggregate).await?;
-
-                ((new_ipv4, new_ipv6), (cur_ipv4, cur_ipv6))
+                let new = fetch_aggregates(&paths, &config).await?;
+                let cur = aggregate::deserialize(&paths.aggregate).await?;
+                (new, cur)
             };
 
             let (ipv4_insert, ipv4_remove) = (&new_ipv4 - &cur_ipv4, &cur_ipv4 - &new_ipv4);
@@ -278,7 +239,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
         }
     };
 
-    save_aggregates(&paths, &new_ipv4, &new_ipv6).await?;
+    save_aggregates(&paths.aggregate, &new_ipv4, &new_ipv6).await?;
 
     Ok(())
 }
@@ -313,16 +274,12 @@ async fn download(path: impl AsRef<Path>, downloads: &Downloads) -> Result<(), a
 }
 
 async fn save_aggregates(
-    paths: &Paths,
+    path: impl AsRef<Path>,
     ipv4: &Aggregate<Ipv4Net>,
     ipv6: &Aggregate<Ipv6Net>,
 ) -> Result<(), AggregateSaveError> {
-    rename_aggregate(&paths.ipv4_aggregate).await?;
-    ipv4.save(&paths.ipv4_aggregate).await?;
-
-    rename_aggregate(&paths.ipv6_aggregate).await?;
-    ipv6.save(&paths.ipv6_aggregate).await?;
-
+    rename_aggregate(&path).await?;
+    aggregate::serialize(&path, ipv4, ipv6).await?;
     Ok(())
 }
 
