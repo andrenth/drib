@@ -125,7 +125,7 @@ fn main() -> Result<(), anyhow::Error> {
         .block_on(work(&config, opts.mode))
 }
 
-fn load_config<P: AsRef<Path>>(path: P) -> Result<Config, anyhow::Error> {
+fn load_config(path: impl AsRef<Path>) -> Result<Config, anyhow::Error> {
     let path = path.as_ref();
     let data = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read '{}'", path.display()))?;
@@ -295,7 +295,7 @@ async fn fetch_aggregates(
     Ok((new_ipv4_aggregate, new_ipv6_aggregate))
 }
 
-async fn download<P: AsRef<Path>>(path: P, downloads: &Downloads) -> Result<(), anyhow::Error> {
+async fn download(path: impl AsRef<Path>, downloads: &Downloads) -> Result<(), anyhow::Error> {
     fs::create_dir_all(&path).await.with_context(|| {
         format!(
             "failed to create downloads directory '{}'",
@@ -326,7 +326,7 @@ async fn save_aggregates(
     Ok(())
 }
 
-async fn rename_aggregate<P: AsRef<Path>>(path: P) -> Result<(), io::Error> {
+async fn rename_aggregate(path: impl AsRef<Path>) -> Result<(), io::Error> {
     let old = old_aggregate_path(&path);
 
     match fs::rename(&path, &old).await {
@@ -336,7 +336,7 @@ async fn rename_aggregate<P: AsRef<Path>>(path: P) -> Result<(), io::Error> {
     }
 }
 
-fn old_aggregate_path<P: AsRef<Path>>(path: P) -> PathBuf {
+fn old_aggregate_path(path: impl AsRef<Path>) -> PathBuf {
     let mut old = PathBuf::from(path.as_ref());
     old.set_extension(OLD_AGGREGATE_EXTENSION);
     old
@@ -412,14 +412,12 @@ where
     Ok(res)
 }
 
-async fn fetch_feed_ranges<P1, P2, T>(
-    path: P1,
-    downloads_path: P2,
+async fn fetch_feed_ranges<T>(
+    path: impl AsRef<Path>,
+    downloads_path: impl AsRef<Path>,
     feeds: &Feeds<T>,
 ) -> Result<ClassRanges<T>, anyhow::Error>
 where
-    P1: AsRef<Path>,
-    P2: AsRef<Path>,
     T: Parse + Net + Eq + Hash + Display + Send + Sync + 'static,
 {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -455,15 +453,13 @@ where
     Ok(class_ranges)
 }
 
-async fn fetch_feed<P1, P2, T>(
-    path: P1,
-    downloads_path: P2,
+async fn fetch_feed<T>(
+    path: impl AsRef<Path>,
+    downloads_path: impl AsRef<Path>,
     name: &str,
     feed: &Feed<T>,
 ) -> Result<HashSet<T>, anyhow::Error>
 where
-    P1: AsRef<Path>,
-    P2: AsRef<Path>,
     T: Net + Display + Hash + Send + 'static,
 {
     match feed.source {
@@ -537,8 +533,8 @@ where
     }
 }
 
-async fn download_resource<P: AsRef<Path>>(
-    path: P,
+async fn download_resource(
+    path: impl AsRef<Path>,
     name: &str,
     res: &RemoteResource,
 ) -> Result<String, anyhow::Error> {
@@ -590,12 +586,12 @@ async fn download_resource<P: AsRef<Path>>(
     }
 }
 
-async fn last_download_time<P: AsRef<Path>>(path: P) -> Result<SystemTime, io::Error> {
+async fn last_download_time(path: impl AsRef<Path>) -> Result<SystemTime, io::Error> {
     let meta = fs::metadata(path).await?;
     meta.modified()
 }
 
-async fn touch<P: AsRef<Path>>(path: P) -> Result<(), io::Error> {
+async fn touch(path: impl AsRef<Path>) -> Result<(), io::Error> {
     OpenOptions::new()
         .write(true)
         .create(true)
@@ -1850,7 +1846,7 @@ mod tests {
         (port, tx)
     }
 
-    async fn test_config<P: AsRef<Path>>(path: P) -> Config {
+    async fn test_config(path: impl AsRef<Path>) -> Config {
         let path = path.as_ref();
         let template_path = path.join("diff.tpl");
         let template = r#"
