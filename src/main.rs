@@ -45,7 +45,7 @@ struct Opts {
         short,
         long,
         name = "FILE",
-        default_value = "/etc/drib/drib.conf",
+        default_value = "/etc/drib/drib.yaml",
         parse(from_os_str)
     )]
     config: PathBuf,
