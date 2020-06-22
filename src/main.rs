@@ -12,8 +12,7 @@ use chrono::{DateTime, Utc};
 use clap::{crate_name, crate_version, Clap};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::{IpNet, IpRange};
-use log::Level;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, Level};
 use reqwest::{header::IF_MODIFIED_SINCE, Client, StatusCode};
 use tokio::fs::{self, OpenOptions};
 use tokio::io;
@@ -26,7 +25,7 @@ use url::Url;
 use drib::aggregate::{self, Aggregate, AggregateSaveError, Entry};
 use drib::config::{Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source};
 use drib::error::{ClassIntersectionError, ConfigError};
-use drib::output::{render_bootstrap, render_diff, Bootstrap, Changes, Diff};
+use drib::output::{self, Bootstrap, Changes, Diff};
 use drib::parser::{Domain, Net, Parse, ParseError};
 use drib::util::safe_write;
 
@@ -179,7 +178,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
             let bootstrap = Bootstrap::new(&ipv4, &ipv6);
             info!("ipv4: +{}", bootstrap.ipv4_len());
             info!("ipv6: +{}", bootstrap.ipv6_len());
-            render_bootstrap(&bootstrap, config.bootstrap.as_ref().unwrap()).await?;
+            output::render_bootstrap(&bootstrap, config.bootstrap.as_ref().unwrap()).await?;
 
             (ipv4, ipv6)
         }
@@ -230,7 +229,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                 diff.ipv6.insert.len(),
                 diff.ipv6.remove.len()
             );
-            render_diff(diff, config.diff.as_ref().unwrap()).await?;
+            output::render_diff(diff, config.diff.as_ref().unwrap()).await?;
 
             (new_ipv4, new_ipv6)
         }

@@ -48,6 +48,10 @@ impl<'a> Bootstrap<'a> {
     pub fn ipv6_len(&self) -> usize {
         self.ipv6.iter().fold(0, |n, (_, a)| n + a.len())
     }
+
+    pub fn len(&self) -> usize {
+        self.ipv4_len() + self.ipv6_len()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -386,16 +390,19 @@ struct Wrap<'a, T: Ord> {
 pub async fn render_bootstrap<'a>(
     bootstrap: &Bootstrap<'a>,
     config: &Templates,
-) -> Result<(), RenderError> {
+) -> Result<Vec<PathBuf>, RenderError> {
+    let mut outputs = Vec::new();
+
     for (kind, ranges) in &bootstrap.ipv4 {
         let w = Wrap { ranges };
-        render_aggregate(&config, &kind, "ipv4", &w).await?;
+        outputs.push(render_aggregate(&config, &kind, "ipv4", &w).await?);
     }
     for (kind, ranges) in &bootstrap.ipv6 {
         let w = Wrap { ranges };
-        render_aggregate(&config, &kind, "ipv6", &w).await?;
+        outputs.push(render_aggregate(&config, &kind, "ipv6", &w).await?);
     }
-    Ok(())
+
+    Ok(outputs)
 }
 
 async fn render_aggregate<'a, T>(
@@ -403,7 +410,7 @@ async fn render_aggregate<'a, T>(
     kind: &Option<String>,
     proto: &str,
     aggregate: &Wrap<'a, T>,
-) -> Result<(), RenderError>
+) -> Result<PathBuf, RenderError>
 where
     T: IpNet + Hash + Serialize,
 {
@@ -416,10 +423,13 @@ where
             .replace("{kind}", kind),
     );
     render(input, &output, &aggregate).await?;
-    Ok(())
+    Ok(output)
 }
 
-pub async fn render_diff<'a>(diff: Diff<'a>, config: &ChunkedTemplates) -> Result<(), RenderError> {
+pub async fn render_diff<'a>(
+    diff: Diff<'a>,
+    config: &ChunkedTemplates,
+) -> Result<Vec<PathBuf>, RenderError> {
     let size = config.max_ranges_per_file.unwrap_or(diff.len());
 
     if size == 0 {
@@ -427,16 +437,19 @@ pub async fn render_diff<'a>(diff: Diff<'a>, config: &ChunkedTemplates) -> Resul
         let output = PathBuf::from(config.templates.output.replace("{i}", "0"));
         let diff = Diff::empty();
         render(input, &output, &diff).await?;
-        return Ok(());
+        return Ok(vec![output]);
     }
+
+    let mut outputs = Vec::new();
 
     for (i, chunk) in diff.chunks(size).enumerate() {
         let input = &config.templates.input;
         let output = chunk_path(&config.templates.output, i);
         render(input, &output, &chunk).await?;
+        outputs.push(output);
     }
 
-    Ok(())
+    Ok(outputs)
 }
 
 async fn render<P, T>(template: P, output: P, data: &T) -> Result<(), RenderError>
