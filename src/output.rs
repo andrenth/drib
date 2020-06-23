@@ -434,7 +434,7 @@ pub async fn render_diff<'a>(
 
     if size == 0 {
         let input = &config.templates.input;
-        let output = PathBuf::from(config.templates.output.replace("{i}", "0"));
+        let output = chunk_path(&config.templates.output, 0);
         let diff = Diff::empty();
         render(input, &output, &diff).await?;
         return Ok(vec![output]);
