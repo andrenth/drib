@@ -229,7 +229,7 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                 diff.ipv6.insert.len(),
                 diff.ipv6.remove.len()
             );
-            output::render_diff(diff, config.diff.as_ref().unwrap()).await?;
+            output::render_diff(&diff, config.diff.as_ref().unwrap()).await?;
 
             (new_ipv4, new_ipv6)
         }

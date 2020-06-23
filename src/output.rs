@@ -387,19 +387,29 @@ struct Wrap<'a, T: Ord> {
     ranges: &'a BTreeSet<&'a Entry<T>>,
 }
 
+const NO_EXTRA_VARIABLES: &[(&str, ())] = &[];
+
 pub async fn render_bootstrap<'a>(
     bootstrap: &Bootstrap<'a>,
     config: &Templates,
+) -> Result<Vec<PathBuf>, RenderError> {
+    render_bootstrap_with_extra_variables(bootstrap, config, NO_EXTRA_VARIABLES).await
+}
+
+pub async fn render_bootstrap_with_extra_variables<'a>(
+    bootstrap: &Bootstrap<'a>,
+    config: &Templates,
+    variables: &[(&str, impl Serialize)],
 ) -> Result<Vec<PathBuf>, RenderError> {
     let mut outputs = Vec::new();
 
     for (kind, ranges) in &bootstrap.ipv4 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv4", &w).await?);
+        outputs.push(render_aggregate(&config, &kind, "ipv4", &w, &variables).await?);
     }
     for (kind, ranges) in &bootstrap.ipv6 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv6", &w).await?);
+        outputs.push(render_aggregate(&config, &kind, "ipv6", &w, &variables).await?);
     }
 
     Ok(outputs)
@@ -410,6 +420,7 @@ async fn render_aggregate<'a, T>(
     kind: &Option<String>,
     proto: &str,
     aggregate: &Wrap<'a, T>,
+    variables: &[(&str, impl Serialize)],
 ) -> Result<PathBuf, RenderError>
 where
     T: IpNet + Hash + Serialize,
@@ -422,13 +433,21 @@ where
             .replace("{proto}", proto)
             .replace("{kind}", kind),
     );
-    render(input, &output, &aggregate).await?;
+    render(input, &output, &aggregate, &variables).await?;
     Ok(output)
 }
 
 pub async fn render_diff<'a>(
-    diff: Diff<'a>,
+    diff: &Diff<'a>,
     config: &ChunkedTemplates,
+) -> Result<Vec<PathBuf>, RenderError> {
+    render_diff_with_extra_variables(diff, config, NO_EXTRA_VARIABLES).await
+}
+
+pub async fn render_diff_with_extra_variables<'a>(
+    diff: &Diff<'a>,
+    config: &ChunkedTemplates,
+    variables: &[(&str, impl Serialize)],
 ) -> Result<Vec<PathBuf>, RenderError> {
     let size = config.max_ranges_per_file.unwrap_or(diff.len());
 
@@ -436,7 +455,7 @@ pub async fn render_diff<'a>(
         let input = &config.templates.input;
         let output = chunk_path(&config.templates.output, 0);
         let diff = Diff::empty();
-        render(input, &output, &diff).await?;
+        render(input, &output, &diff, &variables).await?;
         return Ok(vec![output]);
     }
 
@@ -445,23 +464,33 @@ pub async fn render_diff<'a>(
     for (i, chunk) in diff.chunks(size).enumerate() {
         let input = &config.templates.input;
         let output = chunk_path(&config.templates.output, i);
-        render(input, &output, &chunk).await?;
+        render(input, &output, &chunk, &variables).await?;
         outputs.push(output);
     }
 
     Ok(outputs)
 }
 
-async fn render<P, T>(template: P, output: P, data: &T) -> Result<(), RenderError>
+async fn render<P>(
+    template: P,
+    output: P,
+    data: &impl Serialize,
+    variables: &[(&str, impl Serialize)],
+) -> Result<(), RenderError>
 where
     P: AsRef<Path>,
-    T: Serialize,
 {
+    use tera::Context;
+
     let template = fs::read_to_string(&template).await?;
     let mut tera = Tera::default();
-    let context = tera::Context::from_serialize(&data)?;
-    let res = tera.render_str(&template, &context)?;
+    let mut context = Context::from_serialize(&data)?;
 
+    for (var, val) in variables {
+        context.insert(*var, val);
+    }
+
+    let res = tera.render_str(&template, &context)?;
     safe_write(&output, res.as_bytes()).await?;
     Ok(())
 }
