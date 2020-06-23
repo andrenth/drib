@@ -1509,7 +1509,6 @@ mod tests {
         }
 
         // Download again
-        std::thread::sleep(std::time::Duration::from_secs(10));
         work(&config, diff_mode_with_download())
             .await
             .expect("work failed");
