@@ -401,29 +401,27 @@ struct Wrap<'a, T: Ord> {
     ranges: &'a BTreeSet<&'a Entry<T>>,
 }
 
-const NO_EXTRA_VARIABLES: &[(&str, ())] = &[];
-
 pub async fn render_bootstrap<'a>(
     bootstrap: &Bootstrap<'a>,
     config: &Templates,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    render_bootstrap_with_extra_variables(bootstrap, config, NO_EXTRA_VARIABLES).await
+    render_bootstrap_with_extra(bootstrap, config, BTreeMap::<String, String>::new()).await
 }
 
-pub async fn render_bootstrap_with_extra_variables<'a>(
+pub async fn render_bootstrap_with_extra<'a>(
     bootstrap: &Bootstrap<'a>,
     config: &Templates,
-    variables: &[(&str, impl Serialize)],
+    extra: impl Serialize,
 ) -> Result<Vec<PathBuf>, RenderError> {
     let mut outputs = Vec::new();
 
     for (kind, ranges) in &bootstrap.ipv4 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv4", &w, &variables).await?);
+        outputs.push(render_aggregate(&config, &kind, "ipv4", &w, &extra).await?);
     }
     for (kind, ranges) in &bootstrap.ipv6 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv6", &w, &variables).await?);
+        outputs.push(render_aggregate(&config, &kind, "ipv6", &w, &extra).await?);
     }
 
     Ok(outputs)
@@ -434,7 +432,7 @@ async fn render_aggregate<'a, T>(
     kind: &Option<String>,
     proto: &str,
     aggregate: &Wrap<'a, T>,
-    variables: &[(&str, impl Serialize)],
+    extra: impl Serialize,
 ) -> Result<PathBuf, RenderError>
 where
     T: IpNet + Hash + Serialize,
@@ -447,7 +445,7 @@ where
             .replace("{proto}", proto)
             .replace("{kind}", kind),
     );
-    render(input, &output, &aggregate, &variables).await?;
+    render(input, &output, &aggregate, &extra).await?;
     Ok(output)
 }
 
@@ -455,13 +453,13 @@ pub async fn render_diff<'a>(
     diff: &Diff<'a>,
     config: &ChunkedTemplates,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    render_diff_with_extra_variables(diff, config, NO_EXTRA_VARIABLES).await
+    render_diff_with_extra(diff, config, BTreeMap::<String, String>::new()).await
 }
 
-pub async fn render_diff_with_extra_variables<'a>(
+pub async fn render_diff_with_extra<'a>(
     diff: &Diff<'a>,
     config: &ChunkedTemplates,
-    variables: &[(&str, impl Serialize)],
+    extra: impl Serialize,
 ) -> Result<Vec<PathBuf>, RenderError> {
     let size = config.max_ranges_per_file.unwrap_or(diff.len());
 
@@ -469,7 +467,7 @@ pub async fn render_diff_with_extra_variables<'a>(
         let input = &config.templates.input;
         let output = chunk_path(&config.templates.output, 0);
         let diff = Diff::empty();
-        render(input, &output, &diff, &variables).await?;
+        render(input, &output, &diff, &extra).await?;
         return Ok(vec![output]);
     }
 
@@ -478,7 +476,7 @@ pub async fn render_diff_with_extra_variables<'a>(
     for (i, chunk) in diff.chunks(size).enumerate() {
         let input = &config.templates.input;
         let output = chunk_path(&config.templates.output, i);
-        render(input, &output, &chunk, &variables).await?;
+        render(input, &output, &chunk, &extra).await?;
         outputs.push(output);
     }
 
@@ -488,8 +486,8 @@ pub async fn render_diff_with_extra_variables<'a>(
 async fn render<P>(
     template: P,
     output: P,
-    data: &impl Serialize,
-    variables: &[(&str, impl Serialize)],
+    data: impl Serialize,
+    extra: impl Serialize,
 ) -> Result<(), RenderError>
 where
     P: AsRef<Path>,
@@ -500,9 +498,8 @@ where
     let mut tera = Tera::default();
     let mut context = Context::from_serialize(&data)?;
 
-    for (var, val) in variables {
-        context.insert(*var, val);
-    }
+    let extra = Context::from_serialize(&extra)?;
+    context.extend(extra);
 
     let res = tera.render_str(&template, &context)?;
     safe_write(&output, res.as_bytes()).await?;
