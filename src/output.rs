@@ -196,7 +196,7 @@ pub struct DiffSlice<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Changes<'a, T> {
+pub struct Changes<'a, T: 'a> {
     pub insert: Vec<&'a Entry<T>>,
     pub remove: Vec<&'a Entry<T>>,
 }
