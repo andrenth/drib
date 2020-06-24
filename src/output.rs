@@ -68,6 +68,20 @@ impl<'a> Diff<'a> {
         }
     }
 
+    pub fn ipv4(changes: Changes<'a, Ipv4Net>) -> Diff<'a> {
+        Diff {
+            ipv4: changes,
+            ipv6: Changes::empty(),
+        }
+    }
+
+    pub fn ipv6(changes: Changes<'a, Ipv6Net>) -> Diff<'a> {
+        Diff {
+            ipv4: Changes::empty(),
+            ipv6: changes,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.ipv4.insert.len()
             + self.ipv4.remove.len()
