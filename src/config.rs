@@ -45,13 +45,13 @@ pub struct AggregatePaths {
     pub ipv6: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Templates {
     pub input: PathBuf,
     pub output: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ChunkedTemplates {
     #[serde(flatten)]
     pub templates: Templates,
