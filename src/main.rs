@@ -178,7 +178,8 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
             let bootstrap = Bootstrap::new(&ipv4, &ipv6);
             info!("ipv4: +{}", bootstrap.ipv4_len());
             info!("ipv6: +{}", bootstrap.ipv6_len());
-            output::render_bootstrap(&bootstrap, config.bootstrap.as_ref().unwrap()).await?;
+            let templates = config.bootstrap.as_ref().unwrap();
+            output::render_bootstrap(&bootstrap, &templates.input, &templates.output).await?;
 
             (ipv4, ipv6)
         }
@@ -229,7 +230,14 @@ async fn work(config: &Config, mode: Mode) -> Result<(), anyhow::Error> {
                 diff.ipv6.insert.len(),
                 diff.ipv6.remove.len()
             );
-            output::render_diff(&diff, config.diff.as_ref().unwrap()).await?;
+            let config = config.diff.as_ref().unwrap();
+            output::render_diff(
+                &diff,
+                &config.templates.input,
+                &config.templates.output,
+                config.max_ranges_per_file,
+            )
+            .await?;
 
             (new_ipv4, new_ipv6)
         }

@@ -14,7 +14,6 @@ use tokio::fs;
 use tokio::io;
 
 use crate::aggregate::{Aggregate, Entry};
-use crate::config::{ChunkedTemplates, Templates};
 use crate::parser::Net;
 use crate::util::safe_write;
 
@@ -403,32 +402,45 @@ struct Wrap<'a, T: Ord> {
 
 pub async fn render_bootstrap<'a>(
     bootstrap: &Bootstrap<'a>,
-    config: &Templates,
+    template_path: impl AsRef<Path>,
+    output_template: &str,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    render_bootstrap_with_extra(bootstrap, config, BTreeMap::<String, String>::new()).await
+    render_bootstrap_with_extra(
+        bootstrap,
+        template_path,
+        output_template,
+        BTreeMap::<String, String>::new(),
+    )
+    .await
 }
 
 pub async fn render_bootstrap_with_extra<'a>(
     bootstrap: &Bootstrap<'a>,
-    config: &Templates,
+    template_path: impl AsRef<Path>,
+    output_template: &str,
     extra: impl Serialize,
 ) -> Result<Vec<PathBuf>, RenderError> {
     let mut outputs = Vec::new();
 
     for (kind, ranges) in &bootstrap.ipv4 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv4", &w, &extra).await?);
+        outputs.push(
+            render_aggregate(&template_path, &output_template, &kind, "ipv4", &w, &extra).await?,
+        );
     }
     for (kind, ranges) in &bootstrap.ipv6 {
         let w = Wrap { ranges };
-        outputs.push(render_aggregate(&config, &kind, "ipv6", &w, &extra).await?);
+        outputs.push(
+            render_aggregate(&template_path, &output_template, &kind, "ipv6", &w, &extra).await?,
+        );
     }
 
     Ok(outputs)
 }
 
 async fn render_aggregate<'a, T>(
-    templates: &Templates,
+    template_path: impl AsRef<Path>,
+    output_template: &str,
     kind: &Option<String>,
     proto: &str,
     aggregate: &Wrap<'a, T>,
@@ -438,60 +450,64 @@ where
     T: IpNet + Hash + Serialize,
 {
     let kind = kind.as_deref().unwrap_or("");
-    let input = &templates.input;
     let output = PathBuf::from(
-        templates
-            .output
+        output_template
             .replace("{proto}", proto)
             .replace("{kind}", kind),
     );
-    render(input, &output, &aggregate, &extra).await?;
+    render(template_path, &output, &aggregate, &extra).await?;
     Ok(output)
 }
 
 pub async fn render_diff<'a>(
     diff: &Diff<'a>,
-    config: &ChunkedTemplates,
+    templage_path: impl AsRef<Path>,
+    output_template: &str,
+    max_ranges_per_file: Option<usize>,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    render_diff_with_extra(diff, config, BTreeMap::<String, String>::new()).await
+    render_diff_with_extra(
+        diff,
+        templage_path,
+        output_template,
+        max_ranges_per_file,
+        BTreeMap::<String, String>::new(),
+    )
+    .await
 }
 
 pub async fn render_diff_with_extra<'a>(
     diff: &Diff<'a>,
-    config: &ChunkedTemplates,
+    template_path: impl AsRef<Path>,
+    output_template: &str,
+    max_ranges_per_file: Option<usize>,
     extra: impl Serialize,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    let size = config.max_ranges_per_file.unwrap_or(diff.len());
+    let size = max_ranges_per_file.unwrap_or(diff.len());
 
     if size == 0 {
-        let input = &config.templates.input;
-        let output = chunk_path(&config.templates.output, 0);
+        let output = chunk_path(&output_template, 0);
         let diff = Diff::empty();
-        render(input, &output, &diff, &extra).await?;
+        render(template_path, &output, &diff, &extra).await?;
         return Ok(vec![output]);
     }
 
     let mut outputs = Vec::new();
 
     for (i, chunk) in diff.chunks(size).enumerate() {
-        let input = &config.templates.input;
-        let output = chunk_path(&config.templates.output, i);
-        render(input, &output, &chunk, &extra).await?;
+        let output = chunk_path(&output_template, i);
+        render(&template_path, &output, &chunk, &extra).await?;
         outputs.push(output);
     }
 
     Ok(outputs)
 }
 
-async fn render<P>(
-    template: P,
-    output: P,
+async fn render(
+    template: impl AsRef<Path>,
+    output: impl AsRef<Path>,
     data: impl Serialize,
     extra: impl Serialize,
-) -> Result<(), RenderError>
-where
-    P: AsRef<Path>,
-{
+) -> Result<(), RenderError> {
     use tera::Context;
 
     let template = fs::read_to_string(&template).await?;
