@@ -24,9 +24,11 @@ use url::Url;
 
 use drib::aggregate::{self, Aggregate, AggregateSaveError, Entry};
 use drib::config::{Config, Downloads, Feed, Feeds, Groups, ParserType, RemoteResource, Source};
+use drib::domain::Domain;
 use drib::error::{ClassIntersectionError, ConfigError};
+use drib::net::Net;
 use drib::output::{self, Bootstrap, Changes, Diff};
-use drib::parser::{Domain, Net, Parse, ParseError};
+use drib::parser::{Parse, ParseError};
 use drib::util::safe_write;
 
 const DOWNLOAD_DIR: &'static str = "downloads";

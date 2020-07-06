@@ -14,7 +14,7 @@ use tokio::fs;
 use tokio::io;
 
 use crate::aggregate::{Aggregate, Entry};
-use crate::parser::Net;
+use crate::net::Net;
 use crate::util::safe_write;
 
 #[derive(Debug, Serialize)]

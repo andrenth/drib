@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io;
 
-use crate::parser::Net;
+use crate::net::Net;
 use crate::util::safe_write;
 
 #[derive(Debug, Serialize, Deserialize)]

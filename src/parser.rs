@@ -1,17 +1,12 @@
 use std::collections::HashSet;
-use std::convert::TryFrom;
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::net::IpAddr;
 use std::num::ParseIntError;
-use std::str::FromStr;
 
-use ipnet::AddrParseError;
-use ipnet::{Ipv4Net, Ipv6Net};
-use iprange::IpNet;
 use serde::Deserialize;
-use trust_dns_resolver::config::LookupIpStrategy;
+
+use crate::net::Net;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,55 +180,6 @@ pub fn parse_net<N: Net>(s: &str) -> Result<N, ParseError> {
     Ok(net)
 }
 
-pub trait Net: IpNet + FromStr<Err = AddrParseError> {
-    fn protocol() -> &'static str;
-    fn max_prefix() -> usize;
-    fn from_ip_addr(ip: IpAddr) -> Option<Self>;
-    fn lookup_strategy() -> LookupIpStrategy;
-}
-
-impl Net for Ipv4Net {
-    fn protocol() -> &'static str {
-        "ipv4"
-    }
-
-    fn max_prefix() -> usize {
-        32
-    }
-
-    fn from_ip_addr(ip: IpAddr) -> Option<Ipv4Net> {
-        match ip {
-            IpAddr::V4(ip4) => Some(Ipv4Net::from(ip4.clone())),
-            IpAddr::V6(_) => None,
-        }
-    }
-
-    fn lookup_strategy() -> LookupIpStrategy {
-        LookupIpStrategy::Ipv4Only
-    }
-}
-
-impl Net for Ipv6Net {
-    fn protocol() -> &'static str {
-        "ipv6"
-    }
-
-    fn max_prefix() -> usize {
-        128
-    }
-
-    fn from_ip_addr(ip: IpAddr) -> Option<Ipv6Net> {
-        match ip {
-            IpAddr::V4(_) => None,
-            IpAddr::V6(ip6) => Some(Ipv6Net::from(ip6.clone())),
-        }
-    }
-
-    fn lookup_strategy() -> LookupIpStrategy {
-        LookupIpStrategy::Ipv6Only
-    }
-}
-
 fn extract_fields<T: Clone>(fields: &[T], columns: &[usize]) -> Option<Vec<T>> {
     let len = fields.len();
     match columns.iter().max() {
@@ -286,63 +232,10 @@ impl From<ParseIntError> for ParseError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
-#[serde(try_from = "String")]
-pub struct Domain(String);
-
-impl Domain {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for Domain {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Domain, ParseError> {
-        if s.is_empty() {
-            return Err(ParseError(format!("invalid domain: {}", s)));
-        }
-        Ok(Domain(s.to_owned()))
-    }
-}
-
-impl TryFrom<String> for Domain {
-    type Error = ParseError;
-
-    fn try_from(s: String) -> Result<Domain, ParseError> {
-        s.parse()
-    }
-}
-
-impl fmt::Display for Domain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for Domain {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
 pub trait Parse {
     fn parse(s: &str) -> Result<Self, ParseError>
     where
         Self: Sized;
-}
-
-impl Parse for Domain {
-    fn parse(s: &str) -> Result<Domain, ParseError> {
-        s.parse()
-    }
-}
-
-impl<T: Net> Parse for T {
-    fn parse(s: &str) -> Result<T, ParseError> {
-        parse_net(s)
-    }
 }
 
 #[cfg(test)]

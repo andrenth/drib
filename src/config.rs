@@ -7,7 +7,8 @@ use log::Level;
 use serde::Deserialize;
 use url::Url;
 
-use crate::parser::{Domain, Parser};
+use crate::domain::Domain;
+use crate::parser::Parser;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
