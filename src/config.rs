@@ -26,7 +26,6 @@ pub struct Config {
     #[serde(deserialize_with = "parse_num_threads")]
     pub max_threads: Option<usize>,
 
-    pub aggregate: Option<AggregatePaths>,
     pub bootstrap: Option<Templates>,
     pub diff: Option<ChunkedTemplates>,
 
@@ -38,12 +37,6 @@ pub struct Config {
 
     #[serde(default = "empty_hash_map")]
     pub ipv6: Groups<Ipv6Net>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AggregatePaths {
-    pub ipv4: PathBuf,
-    pub ipv6: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]

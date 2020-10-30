@@ -100,25 +100,6 @@ The maximum number of threads spawned by Drib's async runtime ([Tokio](https://t
 This includes `core_threads`, so setting `max_threads` lower than this value is a configuration error.
 Defaults to 512.
 
-#### `aggregate`
-
-This section defines output paths for Drib *aggregate files* in the `ipv4` and `ipv6` subsettings.
-Aggregate files are simply IP ranges obtained from multiple local or remote sources, as described in the Groups section below.
-IP ranges are optimized inside their groups.
-For example, if a group contains sources defining the `10.0.0.0/24`, `10.0.1.0/24` and `10.0.0.1/32` ranges, the resulting aggreggate will contain a single range, `10.0.0.0/23`.
-
-Before an aggreggate file is generated, the previous one, if existent, will be renamed with a `.old` extension.
-This file is used when Drib runs in diff mode with the `--no-download` flag.
-
-The example below shows an `aggregate` block with the default settings:
-
-```yaml
-aggregate: {
-  ipv4: "/var/lib/drib/ipv4/aggregate",
-  ipv6: "/var/lib/drib/ipv6/aggregate",
-}
-```
-
 #### `bootstrap`
 
 This section defines input and output settings for bootstrap mode.
