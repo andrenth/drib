@@ -1881,7 +1881,6 @@ ipv6_insert: [
             core_threads: None,
             max_threads: None,
 
-            aggregate: None,
             bootstrap: None,
             diff: Some(ChunkedTemplates {
                 templates: Templates {
