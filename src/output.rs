@@ -9,7 +9,7 @@ use iprange::IpNet;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Serialize;
-use tera::{self, Tera};
+use tera::{self, Context, Tera};
 use tokio::fs;
 use tokio::io;
 
@@ -255,10 +255,10 @@ impl<'a, T> Changes<'a, T> {
             };
         }
 
-        panic!(format!(
+        panic!(
             "invalid bounds ({}, {}) for Changes with lengths {} and {}",
             i, j, remove_len, insert_len
-        ));
+        );
     }
 
     fn slice_from(&'a self, i: usize) -> ChangesSlice<'a, T> {
@@ -405,33 +405,43 @@ pub async fn render_bootstrap<'a>(
     template_path: impl AsRef<Path>,
     output_template: &str,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    render_bootstrap_with_extra(
-        bootstrap,
-        template_path,
-        output_template,
-        BTreeMap::<String, String>::new(),
-    )
-    .await
+    render_bootstrap_with_extra(bootstrap, template_path, output_template, Context::new()).await
 }
 
 pub async fn render_bootstrap_with_extra<'a>(
     bootstrap: &Bootstrap<'a>,
     template_path: impl AsRef<Path>,
     output_template: &str,
-    extra: impl Serialize,
+    extra: Context,
 ) -> Result<Vec<PathBuf>, RenderError> {
     let mut outputs = Vec::new();
 
     for (kind, ranges) in &bootstrap.ipv4 {
         let w = Wrap { ranges };
         outputs.push(
-            render_aggregate(&template_path, &output_template, &kind, "ipv4", &w, &extra).await?,
+            render_aggregate(
+                &template_path,
+                &output_template,
+                &kind,
+                "ipv4",
+                &w,
+                extra.clone(),
+            )
+            .await?,
         );
     }
     for (kind, ranges) in &bootstrap.ipv6 {
         let w = Wrap { ranges };
         outputs.push(
-            render_aggregate(&template_path, &output_template, &kind, "ipv6", &w, &extra).await?,
+            render_aggregate(
+                &template_path,
+                &output_template,
+                &kind,
+                "ipv6",
+                &w,
+                extra.clone(),
+            )
+            .await?,
         );
     }
 
@@ -444,7 +454,7 @@ async fn render_aggregate<'a, T>(
     kind: &Option<String>,
     proto: &str,
     aggregate: &Wrap<'a, T>,
-    extra: impl Serialize,
+    extra: Context,
 ) -> Result<PathBuf, RenderError>
 where
     T: IpNet + Hash + Serialize,
@@ -455,7 +465,7 @@ where
             .replace("{proto}", proto)
             .replace("{kind}", kind),
     );
-    render(template_path, &output, &aggregate, &extra).await?;
+    render(template_path, &output, &aggregate, extra).await?;
     Ok(output)
 }
 
@@ -482,20 +492,34 @@ pub async fn render_diff_with_extra<'a>(
     max_ranges_per_file: Option<usize>,
     extra: impl Serialize,
 ) -> Result<Vec<PathBuf>, RenderError> {
-    let size = max_ranges_per_file.unwrap_or(diff.len());
-
-    if size == 0 {
+    let diff_size = diff.len();
+    let chunk_size = max_ranges_per_file.unwrap_or(diff_size);
+    if chunk_size == 0 {
         let output = chunk_path(&output_template, 0);
+        // Create an empty Diff for the max_ranges_per_file = 0 case.
         let diff = Diff::empty();
-        render(template_path, &output, &diff, &extra).await?;
+
+        let mut extra = Context::from_serialize(&extra)?;
+        extra.insert("script_index", &0);
+        extra.insert("is_first_script", &true);
+        extra.insert("is_last_script", &true);
+
+        render(template_path, &output, &diff, extra).await?;
         return Ok(vec![output]);
     }
 
     let mut outputs = Vec::new();
+    let last = last_chunk(diff_size, chunk_size);
 
-    for (i, chunk) in diff.chunks(size).enumerate() {
+    for (i, chunk) in diff.chunks(chunk_size).enumerate() {
         let output = chunk_path(&output_template, i);
-        render(&template_path, &output, &chunk, &extra).await?;
+
+        let mut extra = Context::from_serialize(&extra)?;
+        extra.insert("script_index", &i);
+        extra.insert("is_first_script", &(i == 0));
+        extra.insert("is_last_script", &(i == last));
+
+        render(&template_path, &output, &chunk, extra).await?;
         outputs.push(output);
     }
 
@@ -506,15 +530,12 @@ async fn render(
     template: impl AsRef<Path>,
     output: impl AsRef<Path>,
     data: impl Serialize,
-    extra: impl Serialize,
+    extra: Context,
 ) -> Result<(), RenderError> {
-    use tera::Context;
-
     let template = fs::read_to_string(&template).await?;
     let mut tera = Tera::default();
-    let mut context = Context::from_serialize(&data)?;
 
-    let extra = Context::from_serialize(&extra)?;
+    let mut context = Context::from_serialize(&data)?;
     context.extend(extra);
 
     let res = tera.render_str(&template, &context)?;
@@ -535,6 +556,14 @@ fn chunk_path(output: &str, i: usize) -> PathBuf {
         path
     });
     PathBuf::from(path.to_string())
+}
+
+fn last_chunk(n: usize, k: usize) -> usize {
+    let d = n / k;
+    if n % k == 0 {
+        return d - 1;
+    }
+    d
 }
 
 #[derive(Debug)]
@@ -575,6 +604,13 @@ impl From<tera::Error> for RenderError {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+    use tempdir::TempDir;
+    use tokio::{
+        fs::{self, File},
+        io::AsyncWriteExt,
+    };
+
     use super::*;
 
     #[test]
@@ -590,5 +626,104 @@ mod tests {
         assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{i}-{i}", 42));
         assert_eq!(PathBuf::from("foo42-42"), chunk_path("foo{0i}-{0i}", 42));
         assert_eq!(PathBuf::from("foo042-0042"), chunk_path("foo{3i}-{4i}", 42));
+    }
+
+    #[tokio::test]
+    async fn test_render_empty_diff_is_first_and_last() {
+        let tmp = TempDir::new("drib").expect("tempdir failed");
+        let tpl = "{%- if is_first_script -%}a{% endif %}{%- if is_last_script -%}b{% endif %}";
+        let tpl_path = tmp.path().join("my-template");
+        {
+            let mut file = File::create(&tpl_path)
+                .await
+                .expect("create temporary file failed");
+            file.write_all(tpl.as_bytes())
+                .await
+                .expect("write_all failed");
+        }
+
+        let diff = Diff::empty();
+        let out_path = tmp
+            .path()
+            .join("my-output")
+            .to_str()
+            .expect("out path to str failed")
+            .to_string();
+        let outputs = render_diff(&diff, &tpl_path, &out_path, None)
+            .await
+            .expect("render diff failed");
+        assert_eq!(1, outputs.len());
+        let output = fs::read(&outputs[0]).await.expect("read output failed");
+        assert_eq!(b"ab", output.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_render_diff_variables() {
+        let tmp = TempDir::new("drib").expect("tempdir failed");
+        let tpl = "{%- if is_first_script -%}a{%- endif -%}{%- if is_last_script -%}b{%- endif -%}";
+        let tpl_path = tmp.path().join("my-template");
+        {
+            let mut file = File::create(&tpl_path)
+                .await
+                .expect("create temporary file failed");
+            file.write_all(tpl.as_bytes())
+                .await
+                .expect("write_all failed");
+        }
+
+        let entries = vec![
+            Entry::new(
+                1,
+                None,
+                "myclass".to_string(),
+                "ipv4".to_string(),
+                Ipv4Net::from_str("1.1.1.1/32").unwrap(),
+            ),
+            Entry::new(
+                1,
+                None,
+                "myclass".to_string(),
+                "ipv4".to_string(),
+                Ipv4Net::from_str("2.2.2.2/32").unwrap(),
+            ),
+            Entry::new(
+                1,
+                None,
+                "myclass".to_string(),
+                "ipv4".to_string(),
+                Ipv4Net::from_str("3.3.3.3/32").unwrap(),
+            ),
+        ];
+
+        let diff = Diff {
+            ipv4: Changes {
+                insert: vec![&entries[0], &entries[1], &entries[2]],
+                remove: vec![],
+            },
+            ipv6: Changes::empty(),
+        };
+
+        let out_path = tmp
+            .path()
+            .join("my-output.{i}")
+            .to_str()
+            .expect("out path to str failed")
+            .to_string();
+        let outputs = render_diff(&diff, &tpl_path, &out_path, Some(1))
+            .await
+            .expect("render diff failed");
+        assert_eq!(3, outputs.len());
+
+        assert_eq!(outputs[0], tmp.path().join("my-output.0"));
+        let output = fs::read(&outputs[0]).await.expect("read output failed");
+        assert_eq!(b"a", output.as_slice());
+
+        assert_eq!(outputs[1], tmp.path().join("my-output.1"));
+        let output = fs::read(&outputs[1]).await.expect("read output failed");
+        assert_eq!(b"", output.as_slice());
+
+        assert_eq!(outputs[2], tmp.path().join("my-output.2"));
+        let output = fs::read(&outputs[2]).await.expect("read output failed");
+        assert_eq!(b"b", output.as_slice());
     }
 }
