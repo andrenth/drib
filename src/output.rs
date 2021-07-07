@@ -559,11 +559,13 @@ fn chunk_path(output: &str, i: usize) -> PathBuf {
 }
 
 fn last_chunk(n: usize, k: usize) -> usize {
-    let d = n / k;
-    if n % k == 0 {
-        return d - 1;
+    if n == 0 {
+        return 0;
     }
-    d
+    if n % k == 0 {
+        return n / k - 1;
+    }
+    n / k
 }
 
 #[derive(Debug)]
