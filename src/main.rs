@@ -83,43 +83,20 @@ fn main() -> Result<(), anyhow::Error> {
 
     setup_logger(&config.log_level);
 
-    let mut rt = Builder::new();
-    match (config.core_threads, config.max_threads) {
-        (Some(1), Some(1)) => {
-            rt.basic_scheduler();
+    let mut rt = match config.worker_threads {
+        Some(1) => Builder::new_current_thread(),
+        Some(n) => {
+            let mut b = Builder::new_multi_thread();
+            b.worker_threads(n);
+            b
         }
-        (Some(n), Some(m)) if n > m => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "max_core_threads can't be greater than max_threads",
-            )
-            .into());
-        }
-        (Some(n), Some(m)) => {
-            rt.threaded_scheduler();
-            rt.core_threads(n);
-            rt.max_threads(m);
-        }
-        (Some(n), None) => {
-            rt.threaded_scheduler();
-            rt.core_threads(n);
-        }
-        (None, Some(m)) => {
+        None => {
             let n = num_cpus::get();
-            if n > m {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "max_core_threads default is larger than max_threads",
-                )
-                .into());
-            }
-            rt.threaded_scheduler();
-            rt.max_threads(m);
+            let mut b = Builder::new_multi_thread();
+            b.worker_threads(n);
+            b
         }
-        (None, None) => {
-            rt.threaded_scheduler();
-        }
-    }
+    };
     rt.enable_all()
         .build()
         .expect("failed to build tokio runtime")
@@ -606,7 +583,7 @@ where
         use trust_dns_resolver::system_conf::read_system_conf;
         let (config, mut opts) = read_system_conf()?;
         opts.ip_strategy = T::lookup_strategy();
-        AsyncResolver::tokio(config, opts).await?
+        AsyncResolver::tokio(config, opts)?
     };
 
     for domain in domains {
@@ -1778,7 +1755,7 @@ mod tests {
 
     async fn run_server(feeds: Arc<RwLock<HashMap<String, String>>>) -> (u16, Sender<()>) {
         let mut rng = rand::thread_rng();
-        let port = rng.gen_range(1024, 65535);
+        let port = rng.gen_range(1024..=65535);
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let make_svc = make_service_fn(move |_conn| {
             let feeds = feeds.clone();
@@ -1878,8 +1855,7 @@ ipv6_insert: [
         Config {
             state_dir: PathBuf::from(path),
             log_level: Level::Error,
-            core_threads: None,
-            max_threads: None,
+            worker_threads: None,
 
             bootstrap: None,
             diff: Some(ChunkedTemplates {

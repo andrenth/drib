@@ -20,11 +20,7 @@ pub struct Config {
 
     #[serde(default)]
     #[serde(deserialize_with = "parse_num_threads")]
-    pub core_threads: Option<usize>,
-
-    #[serde(default)]
-    #[serde(deserialize_with = "parse_num_threads")]
-    pub max_threads: Option<usize>,
+    pub worker_threads: Option<usize>,
 
     pub bootstrap: Option<Templates>,
     pub diff: Option<ChunkedTemplates>,

@@ -89,16 +89,10 @@ The directory where Drib stores downloaded ranges and calculated range aggregate
 Drib's log level.
 Valid values are `error`, `warn`, `info`, `debug` or `trace` (defaults to `info`).
 
-#### `core_threads`
+#### `worker_threads`
 
 Sets the number of worker threads in Drib's async runtime's ([Tokio](https://tokio.rs/)) thread pool.
 Defaults to the number of cores available to the system.
-
-#### `max_threads`
-
-The maximum number of threads spawned by Drib's async runtime ([Tokio](https://tokio.rs/)).
-This includes `core_threads`, so setting `max_threads` lower than this value is a configuration error.
-Defaults to 512.
 
 #### `bootstrap`
 
