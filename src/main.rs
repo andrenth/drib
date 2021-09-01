@@ -491,7 +491,7 @@ async fn download_resource(
             return Ok(s);
         }
         let err = res.unwrap_err();
-        warn!("{}: downloading anyway due to read error: {}", name, err,);
+        warn!("{}: downloading anyway due to read error: {}", name, err);
     }
     loop {
         match get(&res.url, last).await {
@@ -519,11 +519,10 @@ async fn download_resource(
                     .with_context(|| format!("{}: failed to read file", name));
             }
             Err(e) => {
-                error!("failed to download '{}': {}", res.url, e);
-                if let Err(e) = touch(&path).await {
-                    warn!("failed to touch '{}': {}", path.display(), e);
-                }
-                return Err(e.into());
+                error!("error downloading '{}': {}", res.url, e);
+                return fs::read_to_string(&path)
+                    .await
+                    .with_context(|| format!("{}: failed to read file", name));
             }
         }
     }
