@@ -1585,7 +1585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domain_lists_are_resolved_correctly() {
+    async fn test_domain_lists_are_resolved_correctly() {
         let tmp = TempDir::new("drib").expect("tempdir failed");
         let mut config = test_config(tmp.path()).await;
 
