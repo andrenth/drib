@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::io::ErrorKind;
@@ -642,9 +643,10 @@ fn resolved_domain_path<P>(base: P, domain: &Domain, proto: &str) -> PathBuf
 where
     P: AsRef<Path>,
 {
-    let mut path = base.as_ref().join(domain.as_str());
-    path.set_extension(proto);
-    path
+    let mut path: OsString = base.as_ref().join(domain.as_str()).into();
+    path.push(".");
+    path.push(proto);
+    path.into()
 }
 
 async fn load_resolved<P, T>(path: P, domain: &Domain) -> Result<HashSet<T>, anyhow::Error>
@@ -771,6 +773,7 @@ mod tests {
     };
 
     use drib::config::*;
+    use drib::domain::*;
     use drib::parser::*;
 
     use super::*;
@@ -1908,5 +1911,14 @@ ipv6_insert: [
 
     fn diff_mode_with_download() -> Mode {
         Mode::Diff(NoDownload { no_download: false })
+    }
+
+    #[test]
+    fn test_resolved_domain_path() {
+        let domain: Domain = "foo.com".parse().unwrap();
+        assert_eq!(
+            PathBuf::from("/some/path/foo.com.ipv4"),
+            resolved_domain_path("/some/path", &domain, "ipv4"),
+        );
     }
 }
