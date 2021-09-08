@@ -15,7 +15,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::{IpNet, IpRange};
 use log::{debug, error, info, warn, Level};
 use reqwest::{header::IF_MODIFIED_SINCE, Client, StatusCode};
-use tokio::fs::{self, OpenOptions};
+use tokio::fs;
 use tokio::io;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
@@ -532,15 +532,6 @@ async fn download_resource(
 async fn last_download_time(path: impl AsRef<Path>) -> Result<SystemTime, io::Error> {
     let meta = fs::metadata(path).await?;
     meta.modified()
-}
-
-async fn touch(path: impl AsRef<Path>) -> Result<(), io::Error> {
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(path.as_ref())
-        .await?;
-    Ok(())
 }
 
 fn time_to_download(now: SystemTime, interval: Duration, last: Option<SystemTime>) -> bool {
