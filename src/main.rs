@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use clap::{crate_name, crate_version, Clap};
+use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::{IpNet, IpRange};
 use log::{debug, error, info, warn, Level};
@@ -41,8 +41,8 @@ const OLD_AGGREGATE_EXTENSION: &'static str = "old";
 
 type ClassRanges<T> = HashMap<String, IpRange<T>>;
 
-#[derive(Debug, Clap)]
-#[clap(name = crate_name!(), version = crate_version!())]
+#[derive(Debug, Parser)]
+#[clap(version, author, about, long_about = None)]
 struct Opts {
     #[clap(
         short,
@@ -56,19 +56,20 @@ struct Opts {
     mode: Mode,
 }
 
-#[derive(Debug, Copy, Clone, Clap)]
+#[derive(Debug, Copy, Clone, Subcommand)]
 enum Mode {
-    #[clap(about = "aggregate mode")]
+    /// Aggregate mode
     Aggregate,
-    #[clap(about = "bootstrap mode")]
+    /// Bootstrap mode
     Bootstrap(NoDownload),
-    #[clap(about = "diff mode")]
+    /// Diff mode
     Diff(NoDownload),
 }
 
-#[derive(Debug, Clone, Copy, Clap)]
+#[derive(Debug, Clone, Copy, Parser)]
 struct NoDownload {
-    #[clap(long, about = "use previously generated aggregate")]
+    /// use previously generated aggregate
+    #[clap(long)]
     no_download: bool,
 }
 

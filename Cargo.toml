@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 bincode = "1"
-clap = "3.0.0-beta.2"
+clap = { version = "3.1.12", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 env_logger = "0.8"
 humantime = "2"
