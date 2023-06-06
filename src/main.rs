@@ -766,7 +766,7 @@ mod tests {
 
     use drib::config::*;
     use drib::domain::*;
-    use drib::parser::*;
+    use drib::parser::{OnePerLine, Parser};
 
     use super::*;
 
